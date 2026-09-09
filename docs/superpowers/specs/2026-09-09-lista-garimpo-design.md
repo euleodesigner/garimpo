@@ -157,14 +157,24 @@ Compartilhar o cookie entre subdomínios amplia o alcance de qualquer XSS: uma
 página pública renderiza texto que o próprio creator ou os guests escreveram
 (nome da lista, descrição, recadinhos) — antes, um XSS ali só afetaria aquele
 subdomínio; com o cookie valendo pra `*.listagarimpo.com.br`, ele passaria a
-valer também pra `app.`. Duas mitigações, não uma só:
-- O cookie é `HttpOnly` (JavaScript no browser não consegue lê-lo, então nem um
-  XSS bem-sucedido rouba a sessão diretamente) + `Secure` (só em HTTPS) +
-  `SameSite=Lax` — configuração padrão do `@supabase/ssr`, só o `Domain` muda.
+valer também pra `app.`. **O cookie do `@supabase/ssr` não é `HttpOnly` por
+padrão** — precisa ser lido via `document.cookie` pelo client de browser
+(`createBrowserClient`) pra manter a sessão reativa no client-side, então não dá
+pra simplesmente marcar `HttpOnly` sem quebrar esse client. Isso significa que a
+defesa real contra essa escalada **não é o cookie, é nunca ter o XSS em primeiro
+lugar**:
 - Nenhum texto vindo de creator/guest (nome, descrição, recadinhos, RSVP) é
   renderizado com `dangerouslySetInnerHTML` em lugar nenhum do app — o
-  escapamento automático do JSX do React é a defesa real contra XSS armazenado
-  aqui, não o cookie. Isso vale tanto nas páginas públicas quanto no painel.
+  escapamento automático do JSX do React já impede XSS armazenado por esse texto,
+  tanto nas páginas públicas quanto no painel.
+- `Secure` (só em HTTPS) e `SameSite=Lax` continuam ativos (padrão do
+  `@supabase/ssr`, só o `Domain` muda) — protegem contra interceptação em
+  trânsito e contra o cookie vazar em navegação cross-site, mas não contra um XSS
+  que já rodou no mesmo domínio.
+- Como reforço adicional (não substitui a regra acima), a página pública envia um
+  header `Content-Security-Policy` restringindo `script-src` a `'self'` — reduz o
+  impacto de um XSS que escape da revisão de código, mas o controle real continua
+  sendo nunca injetar HTML não confiável.
 
 ## 6. Modelo de dados
 
@@ -392,25 +402,31 @@ language plpgsql
 security definer
 set search_path = ''
 as $$
+declare
+  v_status text;
 begin
-  update public.reservations r
-    set status = 'cancelado'
-    from public.products p
+  -- primeiro confirma que a reserva existe e pertence a uma lista do
+  -- usuário logado, seja qual for o status atual dela
+  select r.status into v_status
+    from public.reservations r
+    join public.products p on p.id = r.product_id
     join public.lists l on l.id = p.list_id
     where r.id = p_reservation_id
-      and r.product_id = p.id
-      and r.status = 'reservado' -- já cancelada não conta como "encontrada":
-                                  -- sem isso, reenviar o cancelamento de uma
-                                  -- reserva já cancelada bate no id/dono, o
-                                  -- UPDATE "acerta" a própria linha sem mudar
-                                  -- nada, e FOUND fica true mesmo assim
-      and l.owner_id = (select auth.uid()); -- só o dono da lista cancela
+      and l.owner_id = (select auth.uid())
+    for update of r;
 
   if not found then
-    -- id inexistente, reserva de outra lista, ou já cancelada — o client
-    -- precisa saber que nada mudou, não receber um "sucesso" silencioso
+    -- id inexistente ou reserva de uma lista que não é sua
     raise exception 'Reserva não encontrada ou você não tem permissão para cancelá-la';
   end if;
+
+  if v_status = 'cancelado' then
+    return; -- retry idempotente (duplo clique, retry de rede): já está
+            -- cancelada, mesmo comportamento de reserve_product() (§7.3) —
+            -- não é erro, só não há nada a fazer
+  end if;
+
+  update public.reservations set status = 'cancelado' where id = p_reservation_id;
 end;
 $$;
 
@@ -556,10 +572,15 @@ as $$
   );
 $$;
 
--- mesmo padrão de is_owner() (§7.2): revoga de PUBLIC/anon e não concede a
--- ninguém diretamente — só é chamada de dentro das views abaixo, que rodam
--- com o privilégio de quem as criou, não do papel anon/authenticated
-revoke execute on function private.lista_visivel(uuid) from public, anon, authenticated;
+-- diferente de is_owner() (§7.2), esta função NÃO fica travada para
+-- anon/authenticated: ela não protege nada sensível, só decide se uma lista é
+-- visível (mesma pergunta que a RLS pública já responderia). Concedendo
+-- EXECUTE a anon/authenticated, ela continua funcionando mesmo se um dia
+-- alguém marcar products_public/reservations_public como
+-- security_invoker = true (aí a view passaria a rodar com o privilégio de
+-- quem chama, não de quem criou) — sem essa concessão, essa mudança futura
+-- quebraria as duas views com "permission denied" sem aviso nenhum aqui.
+grant execute on function private.lista_visivel(uuid) to anon, authenticated;
 
 create view public.products_public as
   select p.id, p.list_id, p.nome, p.descricao, p.preco, p.moeda, p.quantidade,
