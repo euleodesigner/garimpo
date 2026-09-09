@@ -131,7 +131,10 @@ criação e na aba Configurações) rejeita uma lista curada de palavras que col
 com o roteamento — `app`, `www`, `api`, `admin`, `mail`, `ftp`, `root` — além do
 domínio raiz sem subdomínio. Sem essa checagem, uma lista com slug `app` fica
 permanentemente inacessível no seu próprio subdomínio, porque o middleware sempre
-resolve `app.` para o dashboard antes de sequer olhar para o slug.
+resolve `app.` para o dashboard antes de sequer olhar para o slug. Hostnames não
+diferenciam maiúsculas de minúsculas, então tanto a comparação com a lista de
+reservados quanto a própria coluna `slug` normalizam sempre para minúsculas antes
+de salvar/comparar — `App` é rejeitado pelo mesmo motivo que `app`.
 
 ## 6. Modelo de dados
 
@@ -232,7 +235,10 @@ create unique index reservations_unica_por_convidado
 create or replace function public.reserve_product(
   p_product_id uuid, p_guest_nome text, p_guest_telefone text
 )
-returns public.reservations
+-- retorna a reserva junto com um flag "nova": o chamador usa esse flag pra
+-- decidir se dispara e-mail de notificação, sem que um retry idempotente
+-- gere um segundo e-mail para a mesma reserva
+returns table (reserva public.reservations, nova boolean)
 language plpgsql
 security definer
 set search_path = ''
@@ -255,7 +261,8 @@ begin
       and guest_telefone = p_guest_telefone
       and status = 'reservado';
   if found then
-    return v_existente;
+    return query select v_existente, false;
+    return;
   end if;
 
   select count(*) into v_reservados from public.reservations
@@ -269,7 +276,7 @@ begin
     values (p_product_id, p_guest_nome, p_guest_telefone)
     returning * into v_nova;
 
-  return v_nova;
+  return query select v_nova, true;
 end;
 $$;
 
@@ -277,17 +284,20 @@ grant execute on function public.reserve_product(uuid, text, text) to anon, auth
 ```
 
 A tabela `reservations` não recebe `insert` direto de `anon` — só através dessa
-função. A transação é curta (um lock de linha + duas contagens + um insert), sem
-chamadas externas no meio, seguindo a prática recomendada de manter transações
-curtas para não segurar locks.
+função. A transação é curta: no caminho normal, um lock de linha + duas buscas
+(duplicata + contagem de vagas) + um insert; no caminho de retry (convidado já
+tinha reservado), só o lock de linha + a busca da duplicata, sem contagem nem
+insert. Sem chamadas externas em nenhum dos dois caminhos, seguindo a prática
+recomendada de manter transações curtas para não segurar locks.
 
 **Onde dispara o e-mail de reserva:** nunca dentro de `reserve_product()` — a
 função fica só com banco, sem chamada externa. Quem chama o Resend é a Server
-Action que o formulário de reserva do guest invoca: ela primeiro chama
-`reserve_product()` (rápido, transação curta) e, só depois de receber sucesso,
-dispara o e-mail — já fora de qualquer transação/lock do Postgres. Se o Resend
-falhar ou demorar, a reserva já está confirmada; o pior caso é o creator não
-receber o e-mail, nunca o guest perder a reserva.
+Action que o formulário de reserva do guest invoca: ela chama `reserve_product()`
+e só dispara o e-mail se `nova = true` — se `nova = false`, é um retry do mesmo
+convidado e o e-mail já foi enviado na primeira vez. O envio acontece já fora de
+qualquer transação/lock do Postgres; se o Resend falhar ou demorar, a reserva já
+está confirmada — o pior caso é o creator não receber o e-mail, nunca o guest
+perder a reserva ou receber notificação duplicada.
 
 ### 7.4 Onde moram os segredos de afiliação — decisão
 
@@ -308,11 +318,15 @@ seguro desde que:
 - Os campos que são segredo de fato (`shopee_app_secret`, `awin_api_key`,
   `admitad_client_secret`) são gravados via **Supabase Vault**
   (`vault.create_secret()`), não como coluna de texto puro — `admin_config` guarda
-  só o `id` do segredo no Vault, e a leitura real acontece via
-  `vault.decrypted_secrets` dentro da mesma Server Action que já checa
-  `is_owner()`. Isso importa porque RLS não protege contra acesso direto ao
-  Postgres (um `pg_dump`, um backup, o editor SQL do próprio Supabase) — quem tiver
-  esse tipo de acesso bruto ainda não lê o segredo em texto puro. Campos que são só
+  só o `id` do segredo no Vault. O schema `vault` só é acessível ao papel
+  `service_role` por padrão (nem `authenticated` consegue consultar
+  `vault.decrypted_secrets`), então a leitura real segue o mesmo padrão do
+  redirect de compra (§7.6): a Server Action primeiro confere `is_owner()` na
+  sessão do usuário logado (autorização) e só então lê o segredo usando o
+  **cliente admin** (service role) — nunca com o client autenticado do próprio
+  usuário. Isso importa porque RLS não protege contra acesso direto ao Postgres
+  (um `pg_dump`, um backup, o editor SQL do próprio Supabase) — quem tiver esse
+  tipo de acesso bruto ainda não lê o segredo em texto puro. Campos que são só
   identificadores públicos (`shopee_app_id`, `awin_publisher_id`,
   `admitad_client_id`) podem continuar como coluna normal.
 - `SUPABASE_SERVICE_ROLE_KEY` continua sendo a única exceção que fica em variável de
@@ -338,10 +352,34 @@ cliente admin.
 
 ### 7.6 Leitura pública
 
-`lists`: select público permitido só para servir a página pública por slug — a
-query pública nunca faz `select *`; a Server Component da página pública seleciona
-explicitamente as colunas necessárias (nome, descrição, aparência, flags), nunca
-campos internos.
+O gate de "essa lista pode ser vista publicamente" é a coluna que já existe em
+`lists`: `status = 'ativa'` (uma lista `arquivada` não é servida no subdomínio
+público). As políticas de leitura anônima de `lists` e `products` usam
+exatamente essa coluna — nenhuma tabela/flag nova precisa ser criada:
+
+```sql
+-- lists: anon só lê listas ativas; nunca lê admin_config, secrets, etc.
+create policy lists_leitura_publica on public.lists
+  for select
+  to anon
+  using (status = 'ativa');
+
+-- products: anon só lê produtos de listas ativas — essa é a policy que
+-- sustenta a view products_public (abaixo) para o papel anon
+create policy products_leitura_publica on public.products
+  for select
+  to anon
+  using (
+    exists (
+      select 1 from public.lists
+      where lists.id = products.list_id and lists.status = 'ativa'
+    )
+  );
+```
+
+`lists`: a query pública nunca faz `select *`; a Server Component da página
+pública seleciona explicitamente as colunas necessárias (nome, descrição,
+aparência, flags), nunca campos internos.
 
 `products`: RLS é por linha, não por coluna — uma policy não consegue esconder só
 `link_afiliado` de quem já tem permissão de ler a linha. Por isso a regra é: **nada
@@ -362,13 +400,13 @@ as
 ```
 
 Como a view usa `security_invoker = true`, ela roda com o papel de quem está
-consultando — então continua respeitando a RLS já definida em `products` (o creator
-só vê produtos das próprias listas; o guest só vê produtos de listas com leitura
-pública liberada). É essa view — nunca a tabela `products` — que tanto a aba
-Presentes do creator quanto a página pública do guest consultam. A tabela base
-`products` (com `link_afiliado` etc.) só é lida diretamente pelo código
-server-side da camada de afiliação (§8) e pelo Route Handler de redirect abaixo,
-sempre com o cliente **admin** (service role).
+consultando — então continua respeitando a RLS já definida em `products`: o
+creator vê produtos das próprias listas (policy de `select` da §7.5), e o guest vê
+produtos de listas ativas (policy `products_leitura_publica` acima). É essa view —
+nunca a tabela `products` — que tanto a aba Presentes do creator quanto a página
+pública do guest consultam. A tabela base `products` (com `link_afiliado` etc.) só
+é lida diretamente pelo código server-side da camada de afiliação (§8) e pelo
+Route Handler de redirect abaixo, sempre com o cliente **admin** (service role).
 
 O redirect de compra ("ir para a loja") é um Route Handler `GET
 /api/go/[productId]` que lê o produto completo com o cliente admin e devolve um
