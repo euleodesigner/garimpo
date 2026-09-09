@@ -138,6 +138,21 @@ diferenciam maiúsculas de minúsculas, então tanto a comparação com a lista 
 reservados quanto a própria coluna `slug` normalizam sempre para minúsculas antes
 de salvar/comparar — `App` é rejeitado pelo mesmo motivo que `app`.
 
+**Sessão compartilhada entre `app.` e `{slug}.`:** por padrão, um cookie de sessão
+do Supabase Auth criado em `app.listagarimpo.com.br` não é enviado em requisições
+para `aniversario-kvqj.listagarimpo.com.br` — são hosts diferentes. Isso importa
+porque §7.6 (`products_public`/`reservations_public`) e §7.3 (`reserve_product`,
+"o dono não reserva o próprio presente") dependem de `auth.uid()` estar disponível
+mesmo quando o creator está navegando na página pública da própria lista. Por
+isso, o cookie de sessão é emitido com `Domain=.listagarimpo.com.br` (nota o ponto
+inicial — abrange qualquer subdomínio), configurado uma vez no helper de
+Supabase Auth do Next.js (`@supabase/ssr`). Em dev local, `*.localhost` também
+aceita `Domain=.localhost` do mesmo jeito, então o comportamento é idêntico nos
+dois ambientes. Sem essa configuração, o guard de "não reservar o próprio
+presente" (§7.3) e a visibilidade de listas ainda não `ativa` para o próprio
+creator (§7.6) simplesmente não funcionam na página pública — o creator aparece
+como anônimo lá, mesmo logado no painel.
+
 ## 6. Modelo de dados
 
 Tabelas conforme a spec original (`profiles`, `lists`, `products`, `reservations`,
@@ -372,6 +387,12 @@ begin
     where r.id = p_reservation_id
       and r.product_id = p.id
       and l.owner_id = (select auth.uid()); -- só o dono da lista cancela
+
+  if not found then
+    -- id inexistente, reserva de outra lista, ou já cancelada — o client
+    -- precisa saber que nada mudou, não receber um "sucesso" silencioso
+    raise exception 'Reserva não encontrada ou você não tem permissão para cancelá-la';
+  end if;
 end;
 $$;
 
@@ -452,7 +473,15 @@ das duas roles recebe `grant select` na tabela base** — só `insert`/`delete` 
 ponto central da §7.6: RLS sozinha não esconde uma coluna específica de quem já
 pode ler a linha, então a única forma de garantir que `link_afiliado` nunca escape
 é impedir qualquer leitura direta da tabela, para qualquer papel que não seja
-`service_role`.
+`service_role`. Isso não pode ficar implícito ("simplesmente não conceder"): a
+migration inclui um `revoke` explícito logo após criar a tabela, porque os
+privilégios padrão do schema `public` no Supabase costumam conceder `select` a
+`anon`/`authenticated` em tabelas novas:
+
+```sql
+revoke select on public.products from anon, authenticated;
+revoke select on public.reservations from anon, authenticated;
+```
 
 ### 7.6 Leitura pública
 
@@ -486,16 +515,30 @@ ou `authenticated`**, para que uma consulta direta via API (PostgREST/Supabase
 client) simplesmente não tenha permissão, RLS à parte. A view roda com o
 privilégio de quem a criou (não do papel `anon`/`authenticated`, que nunca tem
 select na base) — mas embute manualmente a mesma regra de visibilidade que uma
-RLS equivalente teria:
+RLS equivalente teria. Essa regra ("lista ativa, ou eu sou o dono dela") é usada
+por duas views (`products_public` e `reservations_public` logo abaixo), então
+fica numa função só, pra não haver duas cópias do mesmo `where` divergindo com o
+tempo:
 
 ```sql
+create or replace function private.lista_visivel(p_list_id uuid)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.lists
+    where id = p_list_id
+      and (status = 'ativa' or owner_id = (select auth.uid()))
+  );
+$$;
+
 create view public.products_public as
   select p.id, p.list_id, p.nome, p.descricao, p.preco, p.moeda, p.quantidade,
          p.imagem_url, p.created_at
   from public.products p
-  join public.lists l on l.id = p.list_id
-  where l.status = 'ativa'                 -- visível publicamente, ou
-     or l.owner_id = (select auth.uid());  -- é o creator dono da lista
+  where private.lista_visivel(p.list_id);
 
 grant select on public.products_public to anon, authenticated;
 ```
@@ -524,8 +567,7 @@ create view public.reservations_public as
   select r.id, r.product_id, r.status
   from public.reservations r
   join public.products p on p.id = r.product_id
-  join public.lists l on l.id = p.list_id
-  where l.status = 'ativa' or l.owner_id = (select auth.uid());
+  where private.lista_visivel(p.list_id);
 
 grant select on public.reservations_public to anon, authenticated;
 ```
@@ -616,11 +658,13 @@ para revisão):
   por slug, `reserve_product()` (§7.3), Route Handler de redirect de compra (§7.6).
 - **Fase 4 — Afiliação:** conversores por marketplace, começando por Shopee
   (API oficial). A tela de admin pra cadastrar credenciais só é construída na
-  Fase 5 — então, pra testar a conversão Shopee nesta fase, `shopee_app_id`/
-  `shopee_app_secret` reais são inseridos direto via SQL editor do Supabase
-  (`select vault.create_secret(...)`, mesmo espírito do bootstrap manual do
-  primeiro owner na Fase 1), até a Fase 5 trazer a tela de verdade. Também nesta
-  fase: scraping via cheerio + fallback manual, popup de WhatsApp.
+  Fase 5 — então, pra testar a conversão Shopee nesta fase, as credenciais reais
+  são inseridas direto via SQL editor do Supabase (mesmo espírito do bootstrap
+  manual do primeiro owner na Fase 1): `shopee_app_id` com um `update
+  admin_config` normal (é identificador público, coluna de texto — §7.4), e
+  `shopee_app_secret` com `select vault.create_secret(...)` (é segredo de fato).
+  Até a Fase 5 trazer a tela de verdade. Também nesta fase: scraping via cheerio
+  + fallback manual, popup de WhatsApp.
 - **Fase 5 — Admin:** config de afiliados (armazenada em `admin_config`, §7.4) —
   agora com a tela de verdade para o owner editar as credenciais inseridas
   manualmente na Fase 4, tabela de usuários, banner, WhatsApp.
