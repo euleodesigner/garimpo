@@ -153,6 +153,19 @@ presente" (§7.3) e a visibilidade de listas ainda não `ativa` para o próprio
 creator (§7.6) simplesmente não funcionam na página pública — o creator aparece
 como anônimo lá, mesmo logado no painel.
 
+Compartilhar o cookie entre subdomínios amplia o alcance de qualquer XSS: uma
+página pública renderiza texto que o próprio creator ou os guests escreveram
+(nome da lista, descrição, recadinhos) — antes, um XSS ali só afetaria aquele
+subdomínio; com o cookie valendo pra `*.listagarimpo.com.br`, ele passaria a
+valer também pra `app.`. Duas mitigações, não uma só:
+- O cookie é `HttpOnly` (JavaScript no browser não consegue lê-lo, então nem um
+  XSS bem-sucedido rouba a sessão diretamente) + `Secure` (só em HTTPS) +
+  `SameSite=Lax` — configuração padrão do `@supabase/ssr`, só o `Domain` muda.
+- Nenhum texto vindo de creator/guest (nome, descrição, recadinhos, RSVP) é
+  renderizado com `dangerouslySetInnerHTML` em lugar nenhum do app — o
+  escapamento automático do JSX do React é a defesa real contra XSS armazenado
+  aqui, não o cookie. Isso vale tanto nas páginas públicas quanto no painel.
+
 ## 6. Modelo de dados
 
 Tabelas conforme a spec original (`profiles`, `lists`, `products`, `reservations`,
@@ -386,6 +399,11 @@ begin
     join public.lists l on l.id = p.list_id
     where r.id = p_reservation_id
       and r.product_id = p.id
+      and r.status = 'reservado' -- já cancelada não conta como "encontrada":
+                                  -- sem isso, reenviar o cancelamento de uma
+                                  -- reserva já cancelada bate no id/dono, o
+                                  -- UPDATE "acerta" a própria linha sem mudar
+                                  -- nada, e FOUND fica true mesmo assim
       and l.owner_id = (select auth.uid()); -- só o dono da lista cancela
 
   if not found then
@@ -518,14 +536,18 @@ select na base) — mas embute manualmente a mesma regra de visibilidade que uma
 RLS equivalente teria. Essa regra ("lista ativa, ou eu sou o dono dela") é usada
 por duas views (`products_public` e `reservations_public` logo abaixo), então
 fica numa função só, pra não haver duas cópias do mesmo `where` divergindo com o
-tempo:
+tempo — sem `set search_path`, porque essa função já referencia `public.lists` de
+forma totalmente qualificada (não há risco de sequestro de search_path pra
+proteger) e, sem essa cláusula, o Postgres consegue *inlinear* a função direto na
+consulta da view em vez de rodar uma sub-consulta por linha, evitando a
+degradação de performance que uma função com `SET` causaria numa página pública
+com muitos produtos:
 
 ```sql
 create or replace function private.lista_visivel(p_list_id uuid)
 returns boolean
 language sql
 stable
-set search_path = ''
 as $$
   select exists (
     select 1 from public.lists
@@ -533,6 +555,11 @@ as $$
       and (status = 'ativa' or owner_id = (select auth.uid()))
   );
 $$;
+
+-- mesmo padrão de is_owner() (§7.2): revoga de PUBLIC/anon e não concede a
+-- ninguém diretamente — só é chamada de dentro das views abaixo, que rodam
+-- com o privilégio de quem as criou, não do papel anon/authenticated
+revoke execute on function private.lista_visivel(uuid) from public, anon, authenticated;
 
 create view public.products_public as
   select p.id, p.list_id, p.nome, p.descricao, p.preco, p.moeda, p.quantidade,
