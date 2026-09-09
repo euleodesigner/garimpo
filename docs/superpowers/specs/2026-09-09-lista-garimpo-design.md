@@ -98,8 +98,7 @@ que orientam o design abaixo:
   antes de salvar, e fallback de upload manual de imagem.
 - Na página pública, "Selecionar este presente" (reservar) e "Ir para a loja"
   (comprar) são **duas ações separadas** — reservar trava o item para os outros
-  convidados; ir para a loja é o redirect de compra. Confirmado como parte deste
-  design (§9.4).
+  convidados (§7.3); ir para a loja é o redirect de compra (§7.6).
 - Painel admin com 3 abas: Afiliados & APIs, Banner promocional, Usuários — a aba de
   afiliados mostra, por loja, o modo de integração e um status "ativo" / "sem
   conversão".
@@ -127,6 +126,13 @@ modernos. Então em dev: `app.localhost:3000` para o painel e
 funciona sem nenhum código condicional de "modo dev". Em produção, só aponta o DNS
 wildcard real (`*.listagarimpo.com.br`) para a VPS.
 
+**Slugs reservados:** a validação de slug (na sugestão automática do passo 2 da
+criação e na aba Configurações) rejeita uma lista curada de palavras que colidem
+com o roteamento — `app`, `www`, `api`, `admin`, `mail`, `ftp`, `root` — além do
+domínio raiz sem subdomínio. Sem essa checagem, uma lista com slug `app` fica
+permanentemente inacessível no seu próprio subdomínio, porque o middleware sempre
+resolve `app.` para o dashboard antes de sequer olhar para o slug.
+
 ## 6. Modelo de dados
 
 Tabelas conforme a spec original (`profiles`, `lists`, `products`, `reservations`,
@@ -141,6 +147,14 @@ tabela de perfis.
 **`products.quantidade`** define quantos convidados podem reservar aquele item no
 total. Não existe um contador redundante — disponibilidade é sempre calculada como
 `quantidade > count(reservations where product_id = X and status = 'reservado')`.
+
+**Exclusão de produto com reservas:** a FK `reservations.product_id` usa
+`on delete cascade` — excluir um produto tem que sempre ser possível (é o único
+caminho de correção da Regra Inviolável #3, e não pode ficar bloqueado por ter
+reservas), e apagar o produto apaga as reservas junto. Como isso pode remover a
+reserva de um convidado sem aviso prévio, a tela de exclusão (aba Presentes) exibe
+uma confirmação sempre que o produto tiver reservas ativas: "Este item tem N
+reserva(s); excluir libera-o para outros convidados e a reserva atual é perdida."
 
 **Storage (Supabase Storage):** um bucket público `public-media`, com subpastas:
 - `products/{list_id}/{product_id}.ext` — imagens de produto.
@@ -181,9 +195,26 @@ revoke execute on function private.is_owner() from public, anon, authenticated;
 grant execute on function private.is_owner() to authenticated; -- só para uso interno em policies
 ```
 
-Usada nas políticas de `profiles` (listar todos, ativar/inativar, excluir),
-`admin_config` (acesso total) e como checagem adicional em `products`/`lists` onde
-fizer sentido.
+Usada nas políticas de `profiles` (listar todos, ativar/inativar, excluir) e
+`admin_config` (acesso total) — **sempre em políticas escopadas `to authenticated`,
+nunca dentro de uma política que também precisa valer para `anon`**. O RLS do
+Postgres só avalia as políticas cujo `to <role>` bate com o papel da sessão atual:
+uma política `to authenticated` simplesmente não entra em jogo quando a sessão é
+anônima, então isso nunca gera erro de permissão para o guest — desde que
+`is_owner()` nunca seja misturada com `OR` dentro da mesma política que também
+aceita `anon`. Onde `products`/`lists` precisam de leitura tanto autenticada
+(creator/owner) quanto anônima (guest), são políticas **separadas** por papel, uma
+para `to authenticated` e outra para `to anon`, nunca uma condição única
+combinando os dois.
+
+**Autoedição de perfil:** `profiles` não tem uma política genérica de `update` do
+tipo `using (id = (select auth.uid()))`, porque isso abriria a coluna `role` (e
+`status`) para o próprio creator se autopromover a `owner`. Quando existir uma tela
+de "editar meu perfil", ela só pode alterar campos não sensíveis (`nome`) através
+de uma função `update_own_profile(nome text)` `security definer` que atualiza só
+essa coluna — nunca via `update` direto do client em `profiles`. `role` e `status`
+só mudam por ação do owner (via as políticas `is_owner()` acima) ou por migration
+manual (bootstrap do primeiro owner, §11).
 
 ### 7.3 Reserva atômica (evita presente duplicado em corrida)
 
@@ -192,6 +223,12 @@ client ler a contagem e depois inserir (janela de corrida), a reserva passa por 
 função de banco que trava a linha do produto durante a checagem:
 
 ```sql
+-- garante que o mesmo convidado (mesmo telefone) não conte duas vezes contra a
+-- quantidade se o pedido de reserva for reenviado (retry de rede, duplo clique)
+create unique index reservations_unica_por_convidado
+  on public.reservations (product_id, guest_telefone)
+  where status = 'reservado';
+
 create or replace function public.reserve_product(
   p_product_id uuid, p_guest_nome text, p_guest_telefone text
 )
@@ -203,11 +240,22 @@ as $$
 declare
   v_qtd int;
   v_reservados int;
+  v_existente public.reservations;
   v_nova public.reservations;
 begin
   select quantidade into v_qtd from public.products where id = p_product_id for update;
   if v_qtd is null then
     raise exception 'Produto não encontrado';
+  end if;
+
+  -- pedido repetido do mesmo convidado devolve a reserva já feita, em vez de
+  -- tentar consumir uma segunda vaga ou estourar em erro
+  select * into v_existente from public.reservations
+    where product_id = p_product_id
+      and guest_telefone = p_guest_telefone
+      and status = 'reservado';
+  if found then
+    return v_existente;
   end if;
 
   select count(*) into v_reservados from public.reservations
@@ -229,9 +277,17 @@ grant execute on function public.reserve_product(uuid, text, text) to anon, auth
 ```
 
 A tabela `reservations` não recebe `insert` direto de `anon` — só através dessa
-função. A transação é curta (um lock de linha + uma contagem + um insert), sem
+função. A transação é curta (um lock de linha + duas contagens + um insert), sem
 chamadas externas no meio, seguindo a prática recomendada de manter transações
 curtas para não segurar locks.
+
+**Onde dispara o e-mail de reserva:** nunca dentro de `reserve_product()` — a
+função fica só com banco, sem chamada externa. Quem chama o Resend é a Server
+Action que o formulário de reserva do guest invoca: ela primeiro chama
+`reserve_product()` (rápido, transação curta) e, só depois de receber sucesso,
+dispara o e-mail — já fora de qualquer transação/lock do Postgres. Se o Resend
+falhar ou demorar, a reserva já está confirmada; o pior caso é o creator não
+receber o e-mail, nunca o guest perder a reserva.
 
 ### 7.4 Onde moram os segredos de afiliação — decisão
 
@@ -249,6 +305,16 @@ seguro desde que:
 - Toda leitura desses campos para uso real (chamar a API da Shopee, montar um link
   Awin) acontece em Server Action/Route Handler usando a sessão do usuário logado —
   nunca uma query direta do client, mesmo que a RLS já bloquearia.
+- Os campos que são segredo de fato (`shopee_app_secret`, `awin_api_key`,
+  `admitad_client_secret`) são gravados via **Supabase Vault**
+  (`vault.create_secret()`), não como coluna de texto puro — `admin_config` guarda
+  só o `id` do segredo no Vault, e a leitura real acontece via
+  `vault.decrypted_secrets` dentro da mesma Server Action que já checa
+  `is_owner()`. Isso importa porque RLS não protege contra acesso direto ao
+  Postgres (um `pg_dump`, um backup, o editor SQL do próprio Supabase) — quem tiver
+  esse tipo de acesso bruto ainda não lê o segredo em texto puro. Campos que são só
+  identificadores públicos (`shopee_app_id`, `awin_publisher_id`,
+  `admitad_client_id`) podem continuar como coluna normal.
 - `SUPABASE_SERVICE_ROLE_KEY` continua sendo a única exceção que fica em variável de
   ambiente pura, porque ela precisa existir antes de qualquer usuário logar.
 
@@ -265,6 +331,11 @@ simplesmente **não tem `update` para o papel `creator`** — só `insert`, `sel
 ninguém além do owner (que não edita produtos de terceiros de qualquer forma). Mais
 simples do que uma trigger e igualmente à prova de falhas.
 
+A policy de `select` continua existindo na tabela base (é o que sustenta a view
+`products_public` da §7.6) — mas nenhum código de aplicação faz `select` direto em
+`products`, exceto a camada de afiliação e o redirect de compra, que usam o
+cliente admin.
+
 ### 7.6 Leitura pública
 
 `lists`: select público permitido só para servir a página pública por slug — a
@@ -272,13 +343,37 @@ query pública nunca faz `select *`; a Server Component da página pública sele
 explicitamente as colunas necessárias (nome, descrição, aparência, flags), nunca
 campos internos.
 
-`products`: select público retorna todas as colunas exceto `link_afiliado`,
-`marketplace` e `afiliacao_status` — usando uma **view** `public.products_public`
-que expõe só as colunas seguras, com RLS própria de leitura anônima. O redirect de
-compra ("ir para a loja") é um Route Handler `GET /api/go/[productId]` que lê o
-produto completo com o cliente **admin** (service role, só no servidor) e devolve um
+`products`: RLS é por linha, não por coluna — uma policy não consegue esconder só
+`link_afiliado` de quem já tem permissão de ler a linha. Por isso a regra é: **nada
+lê a tabela `products` diretamente, nem o creator no próprio painel.** Existe uma
+view `public.products_public`, que expõe só as colunas seguras (tudo exceto
+`link_afiliado`, `marketplace`, `afiliacao_status`):
+
+```sql
+create view public.products_public
+with (security_invoker = true) -- crítico: sem isso a view roda com o
+                                -- privilégio de quem a criou e ignora a RLS
+                                -- da tabela base, vazando produtos de
+                                -- qualquer lista para qualquer sessão
+as
+  select id, list_id, nome, descricao, preco, moeda, quantidade, imagem_url,
+         created_at
+  from public.products;
+```
+
+Como a view usa `security_invoker = true`, ela roda com o papel de quem está
+consultando — então continua respeitando a RLS já definida em `products` (o creator
+só vê produtos das próprias listas; o guest só vê produtos de listas com leitura
+pública liberada). É essa view — nunca a tabela `products` — que tanto a aba
+Presentes do creator quanto a página pública do guest consultam. A tabela base
+`products` (com `link_afiliado` etc.) só é lida diretamente pelo código
+server-side da camada de afiliação (§8) e pelo Route Handler de redirect abaixo,
+sempre com o cliente **admin** (service role).
+
+O redirect de compra ("ir para a loja") é um Route Handler `GET
+/api/go/[productId]` que lê o produto completo com o cliente admin e devolve um
 `302` para `link_afiliado ?? link_original` — o valor do link nunca aparece em um
-payload JSON entregue ao browser.
+payload JSON entregue ao browser, nem para o creator nem para o guest.
 
 `reservations`: guest insere só via `reserve_product()` (§7.3); leitura pública
 retorna apenas `product_id` e se está reservado (para pintar o card como
@@ -335,9 +430,9 @@ Estado atual (checado nesta conversa): nada provisionado ainda para este projeto
   criado na mesma organização, região `sa-east-1` (mesma região do projeto
   existente, adequada para usuários no Brasil). Bancos de projetos diferentes no
   Supabase são completamente isolados.
-- **GitHub:** repositório novo dedicado a este projeto. Abordagem: instalar o `gh`
-  CLI localmente (não estava disponível neste ambiente) e criar o repo por aqui —
-  alternativa é você criar o repositório vazio manualmente e passar a URL.
+- **GitHub:** repositório dedicado a este projeto —
+  `https://github.com/euleodesigner/garimpo.git` (já criado, vazio, configurado
+  como `origin` local).
 - **VPS + EasyPanel:** app novo e isolado dentro do EasyPanel existente, sem alterar
   nenhum app já configurado lá. Deploy via git push, seguindo o fluxo padrão do
   EasyPanel (Docker + build automático).
