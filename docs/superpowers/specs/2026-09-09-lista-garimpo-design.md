@@ -385,17 +385,14 @@ begin
     raise exception 'Produto não encontrado';
   end if;
 
-  -- o dono da lista não reserva o próprio presente
-  if (select auth.uid()) is not null and (select auth.uid()) = v_owner_id then
-    raise exception 'Você não pode reservar um item da sua própria lista';
-  end if;
-
   -- pedido repetido do mesmo convidado devolve a reserva já feita, em vez de
-  -- tentar consumir uma segunda vaga ou estourar em erro — checado ANTES da
-  -- checagem de lista ativa logo abaixo, de propósito: uma reserva que já
-  -- existe continua válida mesmo que a lista tenha sido arquivada depois
-  -- que o convidado reservou (um retry de rede tardio não pode estourar
-  -- erro numa reserva que já foi confirmada com sucesso)
+  -- tentar consumir uma segunda vaga ou estourar em erro — checado antes de
+  -- QUALQUER regra de negócio abaixo (dono, lista ativa), de propósito: uma
+  -- reserva que já existe continua válida mesmo que o estado por trás dela
+  -- tenha mudado depois que o convidado reservou (lista arquivada nesse
+  -- meio-tempo, ou a sessão do próprio chamador virando autenticada entre a
+  -- tentativa original e um retry de rede tardio) — um retry não pode
+  -- estourar erro numa reserva que já foi confirmada com sucesso
   select r.id, r.status into v_existente_id, v_existente_status
     from public.reservations r
     where r.product_id = p_product_id
@@ -406,12 +403,31 @@ begin
     return;
   end if;
 
+  -- daqui pra baixo só roda pra uma reserva realmente NOVA — o bloco acima
+  -- já filtrou qualquer retry de uma reserva existente
+
+  -- o dono da lista não reserva o próprio presente
+  if (select auth.uid()) is not null and (select auth.uid()) = v_owner_id then
+    raise exception 'Você não pode reservar um item da sua própria lista';
+  end if;
+
   -- mesma regra de visibilidade pública do §7.6 (lista precisa estar
-  -- 'ativa') — só é avaliada para uma reserva realmente NOVA (o bloco acima
-  -- já filtrou o caso de retry de uma reserva existente). Sem essa checagem
-  -- aqui, chamar a função direto pela API (RPC pública, sem passar pela
-  -- página) permitiria reservar itens de uma lista arquivada, mesmo que a
-  -- página pública já não sirva mais essa lista para ninguém
+  -- 'ativa') — sem essa checagem aqui, chamar a função direto pela API (RPC
+  -- pública, sem passar pela página) permitiria reservar itens de uma lista
+  -- arquivada, mesmo que a página pública já não sirva mais essa lista para
+  -- ninguém. Nota sobre o trade-off da ordem acima: para uma lista já
+  -- arquivada, um telefone com reserva existente ainda recebe sucesso (bloco
+  -- de retry acima) e um telefone sem reserva recebe este erro — então quem
+  -- já soubesse um telefone conseguiria inferir se ele reservou algo ali,
+  -- mesmo após o arquivamento. Essa mesma inferência (achou vs. não achou)
+  -- já existe hoje para qualquer lista ativa — é inerente a identificar
+  -- convidado só por telefone, sem conta — e não devolve nome nem telefone
+  -- (a função não retorna essas colunas, ver comentário no topo), só
+  -- confirma que aquele telefone reservou aquele item. Fechar essa brecha
+  -- por completo exigiria um token de reserva separado do telefone, fora do
+  -- escopo desta spec; o trade-off aceito aqui é priorizar retry idempotente
+  -- sobre esconder por completo a existência de reservas em listas
+  -- arquivadas.
   if v_list_status <> 'ativa' then
     raise exception 'Esta lista não está mais aceitando reservas';
   end if;
