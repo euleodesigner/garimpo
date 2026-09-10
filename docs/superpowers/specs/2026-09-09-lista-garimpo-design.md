@@ -102,6 +102,10 @@ que orientam o design abaixo:
 - Painel admin com 3 abas: Afiliados & APIs, Banner promocional, Usuários — a aba de
   afiliados mostra, por loja, o modo de integração e um status "ativo" / "sem
   conversão".
+- O número de WhatsApp de contato (`admin_config.whatsapp_numero`, usado no popup
+  de §8) é editado dentro da aba **Banner promocional** — não existe uma 4ª aba
+  dedicada; é só mais um campo de configuração do owner ali, junto do link do
+  banner.
 
 ## 5. Arquitetura de rotas (multi-tenant em um único app Next.js)
 
@@ -191,10 +195,10 @@ tabela de perfis.
 total. Não existe um contador redundante — disponibilidade é sempre calculada como
 `quantidade > count(reservations where product_id = X and status = 'reservado')`.
 
-**`reservations.status`** tem um terceiro valor além dos dois já previstos na spec
-original: além de `'reservado'`, existe `'cancelado'` (usado por
-`cancel_reservation()`, §7.3, quando o creator libera uma reserva individual sem
-excluir o produto). Só linhas `'reservado'` contam para a disponibilidade acima.
+**`reservations.status`** ganha um segundo valor além do `'reservado'` original:
+`'cancelado'` (usado por `cancel_reservation()`, §7.3, quando o creator libera uma
+reserva individual sem excluir o produto). Só linhas `'reservado'` contam para a
+disponibilidade acima.
 
 **Exclusão de produto com reservas:** a FK `reservations.product_id` usa
 `on delete cascade` — excluir um produto tem que sempre ser possível (é o único
@@ -298,10 +302,11 @@ Dois convidados podem tentar reservar o último item ao mesmo tempo. Em vez de o
 client ler a contagem e depois inserir (janela de corrida), a reserva passa por uma
 função de banco que trava a linha do produto durante a checagem:
 
-`guest_telefone` é sempre armazenado **normalizado** (só dígitos, sem máscara —
-`normalizar_telefone()` remove tudo que não é número antes de gravar ou comparar).
-Sem isso, `"(11) 99999-9999"` e `"11999999999"` seriam tratados como convidados
-diferentes, e tanto a checagem de duplicata quanto o índice único abaixo
+`guest_telefone` é sempre armazenado **normalizado** (só dígitos, sem máscara, sem
+código de país — `normalizar_telefone()` remove tudo que não é número e, quando o
+resultado indica DDI `55` na frente, remove esse prefixo também). Sem isso,
+`"(11) 99999-9999"`, `"11999999999"` e `"+55 11 99999-9999"` seriam tratados como
+convidados diferentes, e tanto a checagem de duplicata quanto o índice único abaixo
 deixariam de proteger contra o mesmo convidado reservando duas vezes:
 
 ```sql
@@ -310,7 +315,15 @@ returns text
 language sql
 immutable
 as $$
-  select regexp_replace(p_telefone, '\D', '', 'g');
+  -- 12/13 dígitos = DDI 55 na frente (12 = DDD + fixo, 13 = DDD + celular);
+  -- um número nacional legítimo de 10/11 dígitos nunca cai aqui, mesmo os que
+  -- começam com "55" (DDD válido no Rio Grande do Sul), porque o total de
+  -- dígitos dele é sempre 10 ou 11, nunca 12/13
+  select case
+    when length(d) in (12, 13) and left(d, 2) = '55' then right(d, length(d) - 2)
+    else d
+  end
+  from (select regexp_replace(p_telefone, '\D', '', 'g') as d) t;
 $$;
 
 -- garante que o mesmo convidado (mesmo telefone normalizado) não conte duas
@@ -323,10 +336,14 @@ create unique index reservations_unica_por_convidado
 create or replace function public.reserve_product(
   p_product_id uuid, p_guest_nome text, p_guest_telefone text
 )
--- retorna a reserva junto com um flag "nova": o chamador usa esse flag pra
--- decidir se dispara e-mail de notificação, sem que um retry idempotente
--- gere um segundo e-mail para a mesma reserva
-returns table (reserva public.reservations, nova boolean)
+-- devolve só id/status/flag "nova" — nunca a linha completa de
+-- reservations: é uma RPC pública (grant a anon), então devolver
+-- guest_nome/guest_telefone aqui permitiria qualquer chamador anônimo
+-- descobrir quem reservou um item só sabendo (ou testando) um telefone, sem
+-- nenhuma autenticação. O "nova" o chamador usa pra decidir se dispara
+-- e-mail de notificação, sem que um retry idempotente gere um segundo
+-- e-mail para a mesma reserva
+returns table (reserva_id uuid, status text, nova boolean)
 language plpgsql
 security definer
 set search_path = ''
@@ -334,18 +351,38 @@ as $$
 declare
   v_qtd int;
   v_owner_id uuid;
+  v_list_status text;
   v_telefone text := private.normalizar_telefone(p_guest_telefone);
   v_reservados int;
-  v_existente public.reservations;
-  v_nova public.reservations;
+  v_existente_id uuid;
+  v_existente_status text;
+  v_nova_id uuid;
+  v_nova_status text;
 begin
-  select p.quantidade, l.owner_id into v_qtd, v_owner_id
+  -- telefone inválido (poucos dígitos) normalizaria pra uma string curta ou
+  -- vazia — sem essa checagem, dois convidados diferentes que mandassem um
+  -- "telefone" sem dígitos suficientes colidiriam no mesmo valor normalizado
+  -- e cairiam um na reserva do outro
+  if length(v_telefone) < 10 then
+    raise exception 'Telefone inválido';
+  end if;
+
+  select p.quantidade, l.owner_id, l.status into v_qtd, v_owner_id, v_list_status
     from public.products p
     join public.lists l on l.id = p.list_id
     where p.id = p_product_id
     for update of p;
   if v_qtd is null then
     raise exception 'Produto não encontrado';
+  end if;
+
+  -- mesma regra de visibilidade pública do §7.6 (lista precisa estar
+  -- 'ativa') — sem essa checagem aqui, chamar a função direto pela API
+  -- (RPC pública, sem passar pela página) permitiria reservar itens de uma
+  -- lista arquivada, mesmo que a página pública já não sirva mais essa
+  -- lista para ninguém
+  if v_list_status <> 'ativa' then
+    raise exception 'Esta lista não está mais aceitando reservas';
   end if;
 
   -- o dono da lista não reserva o próprio presente
@@ -355,12 +392,13 @@ begin
 
   -- pedido repetido do mesmo convidado devolve a reserva já feita, em vez de
   -- tentar consumir uma segunda vaga ou estourar em erro
-  select * into v_existente from public.reservations
-    where product_id = p_product_id
-      and private.normalizar_telefone(guest_telefone) = v_telefone
-      and status = 'reservado';
+  select r.id, r.status into v_existente_id, v_existente_status
+    from public.reservations r
+    where r.product_id = p_product_id
+      and private.normalizar_telefone(r.guest_telefone) = v_telefone
+      and r.status = 'reservado';
   if found then
-    return query select v_existente, false;
+    return query select v_existente_id, v_existente_status, false;
     return;
   end if;
 
@@ -373,9 +411,9 @@ begin
 
   insert into public.reservations (product_id, guest_nome, guest_telefone)
     values (p_product_id, p_guest_nome, v_telefone)
-    returning * into v_nova;
+    returning id, status into v_nova_id, v_nova_status;
 
-  return query select v_nova, true;
+  return query select v_nova_id, v_nova_status, true;
 end;
 $$;
 
@@ -602,9 +640,18 @@ Handler de redirect abaixo, sempre com o cliente **admin** (service role, que
 ignora `grant`/RLS por definição).
 
 O redirect de compra ("ir para a loja") é um Route Handler `GET
-/api/go/[productId]` que lê o produto completo com o cliente admin e devolve um
-`302` para `link_afiliado ?? link_original` — o valor do link nunca aparece em um
-payload JSON entregue ao browser, nem para o creator nem para o guest.
+/api/go/[productId]` que lê o produto completo com o cliente admin. Se quem está
+chamando é o próprio dono da lista (`auth.uid() = list.owner_id` — acontece
+quando o creator visita a página pública da própria lista, cenário já previsto
+em §5), o `302` aponta sempre para `link_original`, nunca para `link_afiliado`.
+Para qualquer outro visitante (guest, ou creator que não é dono desta lista), o
+`302` aponta para `link_afiliado ?? link_original`. Essa distinção existe
+porque, diferente de um payload JSON, o cabeçalho `Location` de um redirect **é
+visível no browser** (aba Network, `curl -I`, `fetch(..., {redirect: 'manual'})`)
+— devolver sempre `link_afiliado` aqui vazaria o link de afiliado para o próprio
+creator assim que ele clicasse "Ir para a loja" na própria lista, violando a
+Regra Inviolável #1. O valor do link nunca aparece em um payload JSON entregue
+ao browser, em nenhum dos dois casos.
 
 `reservations`: mesmo raciocínio de `products` — a tabela base não tem `grant
 select` para `anon`/`authenticated` (só `insert`, indiretamente, via
