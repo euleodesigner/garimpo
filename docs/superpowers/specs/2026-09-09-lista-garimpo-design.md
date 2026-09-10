@@ -145,17 +145,24 @@ de salvar/comparar — `App` é rejeitado pelo mesmo motivo que `app`.
 **Sessão compartilhada entre `app.` e `{slug}.`:** por padrão, um cookie de sessão
 do Supabase Auth criado em `app.listagarimpo.com.br` não é enviado em requisições
 para `aniversario-kvqj.listagarimpo.com.br` — são hosts diferentes. Isso importa
-porque §7.6 (`products_public`/`reservations_public`) e §7.3 (`reserve_product`,
-"o dono não reserva o próprio presente") dependem de `auth.uid()` estar disponível
-mesmo quando o creator está navegando na página pública da própria lista. Por
-isso, o cookie de sessão é emitido com `Domain=.listagarimpo.com.br` (nota o ponto
-inicial — abrange qualquer subdomínio), configurado uma vez no helper de
-Supabase Auth do Next.js (`@supabase/ssr`). Em dev local, `*.localhost` também
-aceita `Domain=.localhost` do mesmo jeito, então o comportamento é idêntico nos
-dois ambientes. Sem essa configuração, o guard de "não reservar o próprio
-presente" (§7.3) e a visibilidade de listas ainda não `ativa` para o próprio
-creator (§7.6) simplesmente não funcionam na página pública — o creator aparece
-como anônimo lá, mesmo logado no painel.
+porque três coisas dependem de `auth.uid()` estar disponível mesmo quando o
+creator está navegando na página pública da própria lista: §7.6
+(`products_public`/`reservations_public`), §7.3 (`reserve_product`, "o dono não
+reserva o próprio presente") e o Route Handler de redirect de compra (§7.6,
+`/api/go/[productId]`, que decide entre `link_original` e `link_afiliado`
+conforme quem chama é ou não o dono da lista). Por isso, o cookie de sessão é
+emitido com `Domain=.listagarimpo.com.br` (nota o ponto inicial — abrange
+qualquer subdomínio), configurado uma vez no helper de Supabase Auth do Next.js
+(`@supabase/ssr`). Em dev local, `*.localhost` também aceita `Domain=.localhost`
+do mesmo jeito, então o comportamento é idêntico nos dois ambientes. Sem essa
+configuração, o guard de "não reservar o próprio presente" (§7.3) e a
+visibilidade de listas ainda não `ativa` para o próprio creator (§7.6)
+simplesmente não funcionam na página pública — o creator aparece como anônimo
+lá, mesmo logado no painel. Para o Route Handler de redirect, a consequência é
+mais grave que "aparecer anônimo": o creator anônimo passaria a receber
+`link_afiliado` em vez de `link_original` ao clicar "Ir para a loja" na própria
+lista — violação direta da Regra Inviolável #1, não só uma perda de
+funcionalidade.
 
 Compartilhar o cookie entre subdomínios amplia o alcance de qualquer XSS: uma
 página pública renderiza texto que o próprio creator ou os guests escreveram
@@ -359,11 +366,13 @@ declare
   v_nova_id uuid;
   v_nova_status text;
 begin
-  -- telefone inválido (poucos dígitos) normalizaria pra uma string curta ou
-  -- vazia — sem essa checagem, dois convidados diferentes que mandassem um
-  -- "telefone" sem dígitos suficientes colidiriam no mesmo valor normalizado
-  -- e cairiam um na reserva do outro
-  if length(v_telefone) < 10 then
+  -- telefone inválido/nulo (poucos dígitos, ou nenhum) normalizaria pra uma
+  -- string curta, vazia, ou NULL — sem essa checagem, chamadores diferentes
+  -- que mandassem um "telefone" sem dígitos suficientes (ou omitindo o
+  -- campo) colidiriam no mesmo valor normalizado e cairiam um na reserva do
+  -- outro; "NULL < 10" não é verdadeiro nem falso em SQL, então o "is null"
+  -- explícito é necessário — sem ele, um telefone omitido passaria batido
+  if v_telefone is null or length(v_telefone) < 10 then
     raise exception 'Telefone inválido';
   end if;
 
@@ -376,22 +385,17 @@ begin
     raise exception 'Produto não encontrado';
   end if;
 
-  -- mesma regra de visibilidade pública do §7.6 (lista precisa estar
-  -- 'ativa') — sem essa checagem aqui, chamar a função direto pela API
-  -- (RPC pública, sem passar pela página) permitiria reservar itens de uma
-  -- lista arquivada, mesmo que a página pública já não sirva mais essa
-  -- lista para ninguém
-  if v_list_status <> 'ativa' then
-    raise exception 'Esta lista não está mais aceitando reservas';
-  end if;
-
   -- o dono da lista não reserva o próprio presente
   if (select auth.uid()) is not null and (select auth.uid()) = v_owner_id then
     raise exception 'Você não pode reservar um item da sua própria lista';
   end if;
 
   -- pedido repetido do mesmo convidado devolve a reserva já feita, em vez de
-  -- tentar consumir uma segunda vaga ou estourar em erro
+  -- tentar consumir uma segunda vaga ou estourar em erro — checado ANTES da
+  -- checagem de lista ativa logo abaixo, de propósito: uma reserva que já
+  -- existe continua válida mesmo que a lista tenha sido arquivada depois
+  -- que o convidado reservou (um retry de rede tardio não pode estourar
+  -- erro numa reserva que já foi confirmada com sucesso)
   select r.id, r.status into v_existente_id, v_existente_status
     from public.reservations r
     where r.product_id = p_product_id
@@ -400,6 +404,16 @@ begin
   if found then
     return query select v_existente_id, v_existente_status, false;
     return;
+  end if;
+
+  -- mesma regra de visibilidade pública do §7.6 (lista precisa estar
+  -- 'ativa') — só é avaliada para uma reserva realmente NOVA (o bloco acima
+  -- já filtrou o caso de retry de uma reserva existente). Sem essa checagem
+  -- aqui, chamar a função direto pela API (RPC pública, sem passar pela
+  -- página) permitiria reservar itens de uma lista arquivada, mesmo que a
+  -- página pública já não sirva mais essa lista para ninguém
+  if v_list_status <> 'ativa' then
+    raise exception 'Esta lista não está mais aceitando reservas';
   end if;
 
   select count(*) into v_reservados from public.reservations
@@ -640,15 +654,20 @@ Handler de redirect abaixo, sempre com o cliente **admin** (service role, que
 ignora `grant`/RLS por definição).
 
 O redirect de compra ("ir para a loja") é um Route Handler `GET
-/api/go/[productId]` que lê o produto completo com o cliente admin. Se quem está
-chamando é o próprio dono da lista (`auth.uid() = list.owner_id` — acontece
-quando o creator visita a página pública da própria lista, cenário já previsto
-em §5), o `302` aponta sempre para `link_original`, nunca para `link_afiliado`.
-Para qualquer outro visitante (guest, ou creator que não é dono desta lista), o
-`302` aponta para `link_afiliado ?? link_original`. Essa distinção existe
-porque, diferente de um payload JSON, o cabeçalho `Location` de um redirect **é
-visível no browser** (aba Network, `curl -I`, `fetch(..., {redirect: 'manual'})`)
-— devolver sempre `link_afiliado` aqui vazaria o link de afiliado para o próprio
+/api/go/[productId]` que lê o produto **e a lista dele** com o cliente admin.
+Se a lista não está `ativa` **e** quem está chamando não é o dono dela, devolve
+um 404 normal — mesma regra de visibilidade de `lista_visivel()` (§7.6), sem a
+qual um link `/api/go/[productId]` guardado ou compartilhado continuaria
+funcionando para uma lista já arquivada, mesmo com a página pública dela fora
+do ar. Passando por essa checagem: se quem está chamando é o próprio dono da
+lista (`auth.uid() = list.owner_id` — acontece quando o creator visita a
+página pública da própria lista, cenário previsto em §5), o `302` aponta
+sempre para `link_original`, nunca para `link_afiliado`. Para qualquer outro
+visitante (guest, ou creator que não é dono desta lista), o `302` aponta para
+`link_afiliado ?? link_original`. Essa distinção existe porque, diferente de
+um payload JSON, o cabeçalho `Location` de um redirect **é visível no
+browser** (aba Network, `curl -I`, `fetch(..., {redirect: 'manual'})`) —
+devolver sempre `link_afiliado` aqui vazaria o link de afiliado para o próprio
 creator assim que ele clicasse "Ir para a loja" na própria lista, violando a
 Regra Inviolável #1. O valor do link nunca aparece em um payload JSON entregue
 ao browser, em nenhum dos dois casos.
@@ -695,7 +714,11 @@ scraping).
 
 **Popup de WhatsApp** (quando `afiliacao_status` ∈ {`sem_api`, `sem_autorizacao`,
 `nao_aplicavel`}): mantido como especificado, texto sem menção a comissão/afiliação,
-número vindo de `admin_config.whatsapp_numero`.
+número vindo de `admin_config.whatsapp_numero`. Como a RLS de `admin_config`
+(§7.4) não dá `select` a `anon` em nenhuma circunstância, esse número nunca é
+lido direto pelo client — a Server Component da página pública o busca com o
+cliente admin (mesmo padrão do Route Handler de redirect, §7.6) e repassa só o
+número em si para o popup, nunca o restante de `admin_config`.
 
 ## 9. Funcionalidades por visão
 
