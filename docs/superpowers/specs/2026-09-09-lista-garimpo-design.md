@@ -385,14 +385,34 @@ begin
     raise exception 'Produto não encontrado';
   end if;
 
+  -- lista precisa estar 'ativa' — checado ANTES do lookup de idempotência
+  -- logo abaixo, de propósito, mesmo sabendo que isso custa uma garantia:
+  -- um convidado cuja reserva já existia antes do arquivamento, se fizer um
+  -- retry de rede tardio depois que a lista foi arquivada, vai ver este
+  -- erro em vez de uma reconfirmação silenciosa (a reserva em si não é
+  -- perdida, só a confirmação do retry falha). O motivo de aceitar esse
+  -- custo em vez do oposto (checar isso só depois do lookup, deixando um
+  -- telefone já reservado passar): se o resultado da chamada (sucesso vs.
+  -- erro) variasse com base no telefone testado NUM CENÁRIO DE LISTA
+  -- ARQUIVADA, isso vira um oráculo público — "esse telefone reservou algo
+  -- nesta lista arquivada?" — testável em escala por qualquer chamador
+  -- anônimo (a função é `grant`ada a `anon`, e não há rate limiting descrito
+  -- em lugar nenhum desta spec), sem deixar rastro nenhum: não cria reserva,
+  -- não consome `quantidade`, não aparece pro creator, não dispara e-mail.
+  -- Isso é diferente do caso de uma lista ATIVA: ali um chute errado não é
+  -- de graça, cria uma reserva de verdade (visível ao creator, consumindo
+  -- `quantidade`), o que é ruidoso e autolimitante. Como os telefones aqui
+  -- são WhatsApp de pessoas reais associadas a eventos pessoais (aniversário,
+  -- chá de bebê, casamento), um oráculo assim seria vetor de desanonimização,
+  -- não só curiosidade sobre disponibilidade de item — por isso checar o
+  -- status da lista primeiro, aceitando o custo de idempotência acima, é a
+  -- escolha certa aqui
+  if v_list_status <> 'ativa' then
+    raise exception 'Esta lista não está mais aceitando reservas';
+  end if;
+
   -- pedido repetido do mesmo convidado devolve a reserva já feita, em vez de
-  -- tentar consumir uma segunda vaga ou estourar em erro — checado antes de
-  -- QUALQUER regra de negócio abaixo (dono, lista ativa), de propósito: uma
-  -- reserva que já existe continua válida mesmo que o estado por trás dela
-  -- tenha mudado depois que o convidado reservou (lista arquivada nesse
-  -- meio-tempo, ou a sessão do próprio chamador virando autenticada entre a
-  -- tentativa original e um retry de rede tardio) — um retry não pode
-  -- estourar erro numa reserva que já foi confirmada com sucesso
+  -- tentar consumir uma segunda vaga ou estourar em erro
   select r.id, r.status into v_existente_id, v_existente_status
     from public.reservations r
     where r.product_id = p_product_id
@@ -403,33 +423,13 @@ begin
     return;
   end if;
 
-  -- daqui pra baixo só roda pra uma reserva realmente NOVA — o bloco acima
-  -- já filtrou qualquer retry de uma reserva existente
-
-  -- o dono da lista não reserva o próprio presente
+  -- o dono da lista não reserva o próprio presente — checado depois do
+  -- lookup acima (não antes) pelo mesmo motivo do §7.3 da rodada anterior:
+  -- auth.uid() é lido no momento da chamada, não no momento da reserva
+  -- original, então um retry tardio cuja sessão virou autenticada nesse
+  -- meio-tempo não pode estourar erro numa reserva que já existe
   if (select auth.uid()) is not null and (select auth.uid()) = v_owner_id then
     raise exception 'Você não pode reservar um item da sua própria lista';
-  end if;
-
-  -- mesma regra de visibilidade pública do §7.6 (lista precisa estar
-  -- 'ativa') — sem essa checagem aqui, chamar a função direto pela API (RPC
-  -- pública, sem passar pela página) permitiria reservar itens de uma lista
-  -- arquivada, mesmo que a página pública já não sirva mais essa lista para
-  -- ninguém. Nota sobre o trade-off da ordem acima: para uma lista já
-  -- arquivada, um telefone com reserva existente ainda recebe sucesso (bloco
-  -- de retry acima) e um telefone sem reserva recebe este erro — então quem
-  -- já soubesse um telefone conseguiria inferir se ele reservou algo ali,
-  -- mesmo após o arquivamento. Essa mesma inferência (achou vs. não achou)
-  -- já existe hoje para qualquer lista ativa — é inerente a identificar
-  -- convidado só por telefone, sem conta — e não devolve nome nem telefone
-  -- (a função não retorna essas colunas, ver comentário no topo), só
-  -- confirma que aquele telefone reservou aquele item. Fechar essa brecha
-  -- por completo exigiria um token de reserva separado do telefone, fora do
-  -- escopo desta spec; o trade-off aceito aqui é priorizar retry idempotente
-  -- sobre esconder por completo a existência de reservas em listas
-  -- arquivadas.
-  if v_list_status <> 'ativa' then
-    raise exception 'Esta lista não está mais aceitando reservas';
   end if;
 
   select count(*) into v_reservados from public.reservations
@@ -600,6 +600,20 @@ create policy lists_leitura_publica on public.lists
   to anon
   using (status = 'ativa');
 
+-- authenticated também precisa enxergar listas ativas (não só a própria):
+-- por causa do cookie compartilhado entre app. e {slug}. (§5), um creator
+-- logado que visite a página pública de OUTRA lista (não a dele) chega
+-- como authenticated, não anon — então a policy acima (to anon) não entra
+-- em jogo pra ele, e sem esta segunda policy a página pública devolveria
+-- zero linhas de `lists` pra qualquer creator logado visitando uma lista
+-- que não é a sua. Não reusa private.lista_visivel() (diferente das views
+-- abaixo) porque essa função consulta public.lists — usá-la como policy
+-- da própria tabela lists criaria autorreferência
+create policy lists_leitura_autenticada on public.lists
+  for select
+  to authenticated
+  using (status = 'ativa' or owner_id = (select auth.uid()));
+
 grant select on public.lists to anon, authenticated;
 ```
 
@@ -711,8 +725,15 @@ de confirmar que a lista pertence ao usuário logado — não por RLS de `select
 tabela base, pelo mesmo motivo acima (evitar que qualquer `grant select` na base
 vire uma porta de saída para dados que deveriam passar só pela view).
 
-`messages`/`rsvps`: insert público permitido; leitura pública normal (são
-conteúdos que o próprio guest espera ver publicados).
+`messages`/`rsvps`: insert público permitido; a leitura usa a mesma
+`private.lista_visivel(list_id)` de `products_public`/`reservations_public`
+(`to anon` e `to authenticated`), não um `using (true)` sem filtro — sem esse
+gate, qualquer chamador anônimo conseguiria ler recadinhos e RSVPs de uma
+lista `arquivada` direto pela API (`/rest/v1/messages?list_id=eq...`), mesmo
+com a página pública dela fora do ar, quebrando a mesma invariante de "lista
+arquivada não é servida publicamente" que vale para `products`/`reservations`.
+São conteúdos que o próprio guest espera ver publicados, mas só enquanto a
+lista está com essa visibilidade.
 
 ## 8. Camada de afiliação (server-side)
 
