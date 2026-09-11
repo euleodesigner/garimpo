@@ -1,3 +1,5 @@
+import { lookup } from "node:dns/promises";
+
 // Detecção de loja por domínio + fetch seguro (spec §8). A allowlist é
 // também o gate de segurança do fetch, não só roteamento: sem ela, o campo
 // de link vira um SSRF -- o creator (menor privilégio do sistema) poderia
@@ -124,35 +126,80 @@ function pareceHostPrivado(hostname: string): boolean {
 }
 
 /**
+ * Verifica se o hostname resolve (via DNS de verdade, não só regex sobre o
+ * texto) para algum IP privado/loopback/link-local. Complementa
+ * pareceHostPrivado(): aquela pega o caso óbvio (hostname já É um IP
+ * privado, ex. "127.0.0.1"); esta pega o caso que o regex sozinho não cobre
+ * -- um hostname PÚBLICO cujo registro DNS aponta pra dentro da rede
+ * (DNS rebinding, ou só um domínio configurado assim de propósito). Falha
+ * de resolução (host inexistente etc.) é tratada como privado -- nega por
+ * padrão, já que o fetch adiante ia falhar de qualquer forma.
+ */
+async function enderecoResolvidoEhPrivado(hostname: string): Promise<boolean> {
+  if (pareceHostPrivado(hostname)) return true;
+
+  let enderecos: { address: string }[];
+  try {
+    enderecos = await lookup(hostname, { all: true });
+  } catch {
+    return true;
+  }
+
+  return enderecos.some((e) => pareceHostPrivado(e.address));
+}
+
+/**
  * Baixa uma imagem de uma URL externa (o og:image extraído de uma página já
  * validada pela allowlist acima) para reupload no nosso Storage -- nunca
  * hotlink direto (muitas lojas bloqueiam embed cross-origin, e manter tudo
  * no nosso bucket é consistente com o resto do app). Não é a mesma allowlist
  * de marketplace (CDN de imagem costuma ser um domínio totalmente diferente
- * da loja), mas recusa hosts que parecem apontar pra rede interna -- defesa
- * razoável dado que a URL já veio do conteúdo de uma página confiável, não
- * de entrada direta do creator.
+ * da loja) -- em vez disso, resolve o hostname de verdade (DNS) e recusa
+ * qualquer IP privado/loopback/link-local, a cada hop de redirect (nunca
+ * segue redirect automaticamente sem essa checagem de novo -- mesma lógica
+ * de fetchSeguro, agora aplicada ao IP resolvido, não só ao hostname).
  */
 export async function baixarImagemExterna(
-  url: string,
+  urlInicial: string,
   limiteBytes = 5 * 1024 * 1024,
+  maxRedirects = 5,
 ): Promise<{ bytes: Uint8Array; contentType: string } | null> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
-  if (pareceHostPrivado(parsed.hostname)) return null;
+  let atual = urlInicial;
+  let res: Response | null = null;
 
-  let res: Response;
-  try {
-    res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-  } catch {
-    return null;
+  for (let i = 0; i <= maxRedirects; i++) {
+    let parsed: URL;
+    try {
+      parsed = new URL(atual);
+    } catch {
+      return null;
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    if (await enderecoResolvidoEhPrivado(parsed.hostname)) return null;
+
+    let hop: Response;
+    try {
+      hop = await fetch(atual, { redirect: "manual", signal: AbortSignal.timeout(5000) });
+    } catch {
+      return null;
+    }
+
+    if (hop.status >= 300 && hop.status < 400) {
+      const location = hop.headers.get("location");
+      if (!location) return null;
+      try {
+        atual = new URL(location, atual).toString();
+      } catch {
+        return null;
+      }
+      continue;
+    }
+
+    res = hop;
+    break;
   }
-  if (!res.ok) return null;
+
+  if (!res || !res.ok) return null;
 
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.startsWith("image/")) return null;
