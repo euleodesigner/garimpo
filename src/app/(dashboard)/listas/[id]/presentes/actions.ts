@@ -6,6 +6,13 @@ import { createClient } from "@/lib/supabase/server";
 
 type State = { erro?: string; ok?: boolean } | undefined;
 
+const EXTENSOES_IMAGEM_PERMITIDAS = new Set(["jpg", "jpeg", "png", "webp", "gif"]);
+
+function extensaoSegura(nomeArquivo: string): string {
+  const bruta = (nomeArquivo.split(".").pop() ?? "").toLowerCase();
+  return EXTENSOES_IMAGEM_PERMITIDAS.has(bruta) ? bruta : "jpg";
+}
+
 // Fase 2 do roteiro: cadastro manual, sem busca automática (onBlur) nem
 // conversão de afiliado ainda -- link_afiliado fica null. O conversor
 // plugável por marketplace entra na Fase 4.
@@ -55,8 +62,8 @@ export async function adicionarPresente(
     return { erro: "Não foi possível salvar o presente. Tente de novo." };
   }
 
-  if (imagem && imagem.size > 0) {
-    const ext = imagem.name.split(".").pop() || "jpg";
+  if (imagem && imagem.size > 0 && imagem.type.startsWith("image/")) {
+    const ext = extensaoSegura(imagem.name);
     const path = `products/${listaId}/${produto.id}.${ext}`;
     const { error: uploadError } = await supabase.storage
       .from("public-media")
@@ -79,6 +86,18 @@ export async function excluirPresente(listaId: string, produtoId: string) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
+
+  // confere posse explicitamente antes de excluir -- a RLS de products já
+  // bloqueia um delete em produto de lista alheia (usa o list_id real da
+  // linha, não o parâmetro), mas checar aqui falha rápido e evita chamadas
+  // de Storage desperdiçadas contra um listaId que não é do chamador
+  const { data: lista } = await supabase
+    .from("lists")
+    .select("id")
+    .eq("id", listaId)
+    .eq("owner_id", user.id)
+    .maybeSingle();
+  if (!lista) return;
 
   await supabase.from("products").delete().eq("id", produtoId);
 
