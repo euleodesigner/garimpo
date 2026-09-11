@@ -94,8 +94,10 @@ que orientam o design abaixo:
 - Dentro da lista, navegação lateral com 7 abas: Presentes, Recadinhos, Convidados,
   Compartilhar, Info. do Evento, Aparência, Configurações.
 - No modal de adicionar presente, o link é colado e a busca automática de dados
-  acontece ao sair do campo (`onBlur`), com campos de nome/preço/imagem editáveis
-  antes de salvar, e fallback de upload manual de imagem.
+  (nome/preço/imagem — nunca qualquer campo de link, original ou convertido)
+  acontece ao sair do campo (`onBlur`), com esses campos editáveis antes de
+  salvar, e fallback de upload manual de imagem. A conversão de afiliado em si só
+  acontece no momento de salvar, não no `onBlur` (detalhe em §7.4).
 - Na página pública, "Selecionar este presente" (reservar) e "Ir para a loja"
   (comprar) são **duas ações separadas** — reservar trava o item para os outros
   convidados (§7.3); ir para a loja é o redirect de compra (§7.6).
@@ -127,10 +129,29 @@ Um **middleware** lê o header `Host` em toda requisição:
 
 **Ambiente local (antes de qualquer deploy):** subdomínios de `localhost` resolvem
 para `127.0.0.1` sem precisar editar `/etc/hosts`, e funcionam nos navegadores
-modernos. Então em dev: `app.localhost:3000` para o painel e
-`aniversario-kvqj.localhost:3000` para testar a página pública — o mesmo middleware
-funciona sem nenhum código condicional de "modo dev". Em produção, só aponta o DNS
-wildcard real (`*.listagarimpo.com.br`) para a VPS.
+modernos — suficiente para conferir rapidamente que o middleware e a renderização
+pública funcionam: `app.localhost:3000` para o painel e
+`aniversario-kvqj.localhost:3000` para uma página pública qualquer. **Isso não é
+suficiente**, porém, para testar a sessão compartilhada entre `app.` e `{slug}.`
+(abaixo): navegadores modernos recusam um cookie com `Domain=.localhost`, porque
+`localhost` é tratado como sufixo público sem domínio registrável abaixo — não
+existe "qualquer subdomínio de localhost" para um cookie de domínio ancorar, ao
+contrário do que uma versão anterior desta spec afirmava. Para testar localmente os
+três comportamentos que dependem dessa sessão compartilhada (guard de "não reservar
+o próprio presente", visibilidade de lista ainda não `ativa` para o dono, e a
+escolha `link_original`/`link_afiliado` no redirect de compra — os três descritos
+abaixo), o `/etc/hosts` recebe duas entradas fixas apontando para `127.0.0.1`:
+`app.garimpo.test` e um slug de teste fixo, por exemplo `teste.garimpo.test` —
+bastam essas duas linhas, o dev não precisa de um subdomínio arbitrário por lista,
+só de um exemplo estável. `.test` (não `.local`) é proposital: `.local` é
+reservado pela RFC 6762 para mDNS/Bonjour — no macOS (o SO deste ambiente de dev)
+isso pode causar resolução lenta ou inconsistente dependendo da rede/VPN ativa,
+porque `.local.` passa pelo `mDNSResponder` em vez de resolver direto pelo
+`/etc/hosts`; `.test` é reservado pela RFC 2606 especificamente para uso local
+sem esse conflito. Nesse ambiente o cookie é emitido com `Domain=.garimpo.test`,
+mesmo mecanismo de produção (`Domain=.listagarimpo.com.br`), só trocando o
+domínio-base — ver a nota em "Sessão compartilhada" logo abaixo. Em produção, só
+aponta o DNS wildcard real (`*.listagarimpo.com.br`) para a VPS.
 
 **Slugs reservados:** a validação de slug (na sugestão automática do passo 2 da
 criação e na aba Configurações) rejeita uma lista curada de palavras que colidem
@@ -142,6 +163,42 @@ diferenciam maiúsculas de minúsculas, então tanto a comparação com a lista 
 reservados quanto a própria coluna `slug` normalizam sempre para minúsculas antes
 de salvar/comparar — `App` é rejeitado pelo mesmo motivo que `app`.
 
+Depois que a lista sai de `'rascunho'` (§6; a transição é única e nunca volta) —
+o momento em que ela passa a poder ter sido compartilhada (QR Code gerado, link
+enviado por WhatsApp) — o campo de slug na aba Configurações fica travado. RLS
+não compara o valor antigo com o novo dentro de uma política (`using`/
+`with check` operam sobre a linha, não sabem o que a coluna valia antes do
+`update`), então essa trava não é uma policy comum — é um trigger `before
+update` em `lists`:
+
+```sql
+create or replace function private.travar_slug_pos_rascunho()
+returns trigger
+language plpgsql
+as $$
+begin
+  -- usa new.status, não old.status: um update que troque status e slug no
+  -- mesmo statement (ex.: 'rascunho' -> 'ativa' junto com um novo slug,
+  -- inclusive via chamada direta à API) não pode escapar da trava só porque
+  -- o valor antigo de status ainda era 'rascunho'
+  if new.status <> 'rascunho' and new.slug <> old.slug then
+    raise exception 'Slug não pode ser alterado depois que a lista sai do rascunho';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_travar_slug_pos_rascunho
+  before update on public.lists
+  for each row execute function private.travar_slug_pos_rascunho();
+```
+
+Como `'rascunho'` nunca é reatingido depois de `'ativa'`/`'arquivada'` (§6), o
+predicado `old.status <> 'rascunho'` sozinho já é suficiente e permanente — não
+existe um "voltar a rascunho" que reabriria a janela de edição do slug. O
+trigger só olha a coluna `slug`; qualquer outro `update` na linha (toggles de
+Configurações, Aparência, o próprio `status`) continua funcionando normalmente.
+
 **Sessão compartilhada entre `app.` e `{slug}.`:** por padrão, um cookie de sessão
 do Supabase Auth criado em `app.listagarimpo.com.br` não é enviado em requisições
 para `aniversario-kvqj.listagarimpo.com.br` — são hosts diferentes. Isso importa
@@ -150,11 +207,15 @@ creator está navegando na página pública da própria lista: §7.6
 (`products_public`/`reservations_public`), §7.3 (`reserve_product`, "o dono não
 reserva o próprio presente") e o Route Handler de redirect de compra (§7.6,
 `/api/go/[productId]`, que decide entre `link_original` e `link_afiliado`
-conforme quem chama é ou não o dono da lista). Por isso, o cookie de sessão é
+conforme quem chama está autenticado ou não — não só "é o dono desta lista",
+ver o detalhe em §7.6). Por isso, o cookie de sessão é
 emitido com `Domain=.listagarimpo.com.br` (nota o ponto inicial — abrange
 qualquer subdomínio), configurado uma vez no helper de Supabase Auth do Next.js
-(`@supabase/ssr`). Em dev local, `*.localhost` também aceita `Domain=.localhost`
-do mesmo jeito, então o comportamento é idêntico nos dois ambientes. Sem essa
+(`@supabase/ssr`). Em dev local, como descrito acima em "Ambiente local", o mesmo
+mecanismo é replicado com `Domain=.garimpo.test` via as duas entradas fixas no
+`/etc/hosts` — não sob `*.localhost`, que não sustenta cookie cross-subdomínio
+(o navegador recusa `Domain=.localhost`). O comportamento é equivalente ao de
+produção nesse caminho crítico, ainda que o domínio-base mude. Sem essa
 configuração, o guard de "não reservar o próprio presente" (§7.3) e a
 visibilidade de listas ainda não `ativa` para o próprio creator (§7.6)
 simplesmente não funcionam na página pública — o creator aparece como anônimo
@@ -178,10 +239,15 @@ lugar**:
   renderizado com `dangerouslySetInnerHTML` em lugar nenhum do app — o
   escapamento automático do JSX do React já impede XSS armazenado por esse texto,
   tanto nas páginas públicas quanto no painel.
-- `Secure` (só em HTTPS) e `SameSite=Lax` continuam ativos (padrão do
-  `@supabase/ssr`, só o `Domain` muda) — protegem contra interceptação em
-  trânsito e contra o cookie vazar em navegação cross-site, mas não contra um XSS
-  que já rodou no mesmo domínio.
+- `SameSite=Lax` é padrão do `@supabase/ssr`; `Secure` (só em HTTPS) **não é** —
+  o `DEFAULT_COOKIE_OPTIONS` da biblioteca não inclui `secure`, precisa ser
+  passado explicitamente (`cookieOptions: { secure: true }`, junto do `Domain`,
+  no helper de `@supabase/ssr`; em dev local sobre HTTP puro isso ficaria
+  `secure: process.env.NODE_ENV === 'production'`, já que `Secure` exige HTTPS e
+  o ambiente de dev descrito acima não tem certificado). Com essa opção
+  explícita, os dois protegem contra interceptação em trânsito e contra o
+  cookie vazar em navegação cross-site, mas não contra um XSS que já rodou no
+  mesmo domínio.
 - Como reforço adicional (não substitui a regra acima), a página pública envia um
   header `Content-Security-Policy` restringindo `script-src` a `'self'` — reduz o
   impacto de um XSS que escape da revisão de código, mas o controle real continua
@@ -197,6 +263,67 @@ implementação:
 insert` → cria a linha correspondente em `profiles` com `role = 'creator'` por
 padrão). Isso evita ter que sincronizar manualmente cadastro do Supabase Auth com a
 tabela de perfis.
+
+**`profiles.status`** (`'ativo'` por padrão, ou `'inativo'`) controla só o *login*
+do creator — é checado no fluxo de autenticação (a Server Action de login rejeita
+sessão para `status = 'inativo'`, e a sessão existente é revogada no momento em
+que o owner inativa). Inativar **não** apaga nem arquiva as listas desse creator:
+elas continuam com o `status` que já tinham (ver `lists.status` abaixo) e
+continuam visíveis para quem já tem o link — um guest que já reservou um presente
+numa lista compartilhada não deveria perder acesso por uma decisão administrativa
+sobre a conta do criador, que pode ser temporária. Nenhuma policy de RLS depende
+de `profiles.status`; ele só é lido no fluxo de login, nunca como condição de
+visibilidade de dados.
+
+**Excluir um creator** é diferente de inativar: `lists.owner_id` referencia
+`profiles.id` com `on delete restrict` (nunca `cascade`) — a exclusão de um
+perfil com listas nunca pode simplesmente arrastar as listas junto, pelo mesmo
+motivo acima. Por isso "excluir" no painel owner não roda um `delete` direto em
+`profiles`; chama uma função `security definer` (que, internamente, confere
+`private.is_owner()` antes de agir, mesmo padrão de §7.2) e marca o perfil como
+excluído (`status = 'inativo'`, mais um `excluido_em` para diferenciar de uma
+inativação reversível; a linha não é apagada, para `lists.owner_id` continuar
+resolvendo, e o RESTRICT acima nunca chega a ser testado na prática — fica como
+defesa em profundidade caso algum dia um `delete` direto seja tentado). O
+cadastro em `auth.users` é desabilitado via API admin na mesma operação, para
+impedir login futuro com essa credencial. **As listas do creator excluído não
+são tocadas** — continuam exatamente com o `status` que já tinham, pelo mesmo
+motivo de continuidade do parágrafo acima: excluir a conta é uma decisão sobre
+o *creator*, não sobre os *guests* que já reservaram presentes ou mandaram
+recadinho numa lista dele, então arquivar a lista automaticamente vazaria a
+mesma garantia de continuidade que a inativação promete. A única diferença
+prática entre inativar e excluir, do ponto de vista das listas, é que excluir é
+permanente: a tela de usuários do owner não oferece a ação "ativar" numa linha
+que já tem `excluido_em` preenchido (não existe caminho de volta por essa UI).
+
+**`lists.status`** tem três valores, em transição **única e irreversível**
+`'rascunho'` → `'ativa'` → `'arquivada'` (nunca o caminho inverso) —
+`'rascunho'` é o padrão ao criar (passo 2 do fluxo de criação, §4). Duas ações
+do creator, ambas na aba Configurações, cada uma um botão de confirmação (não
+um toggle, justamente para não ser reversível): "Ativar lista"
+(`rascunho → ativa`, depois disso a lista pode ser compartilhada) e "Encerrar
+evento" (`ativa → arquivada`, pára de aceitar reserva/recadinho/RSVP, mas
+continua mostrando o que já foi presenteado para quem visitar). Ser
+estritamente unidirecional evita dois problemas ao mesmo tempo: (a) sem
+`'rascunho'` como destino possível depois de `'ativa'`, a trava de slug abaixo
+não precisa distinguir "nunca foi ativada" de "foi ativada e voltou" — o
+predicado fica simplesmente "`status <> 'rascunho'`"; e (b) dá ao creator um
+caminho próprio para chegar a `'arquivada'` sem depender de o owner excluir a
+conta dele. Só uma lista `'ativa'` é servida no subdomínio público para quem
+não é o dono (§7.6; `private.lista_visivel()` já trata `'rascunho'` e
+`'arquivada'` da mesma forma para esse fim — "não `ativa`" — porque em ambos os
+casos o dono ainda quer poder pré-visualizar a própria página pública, e é
+exatamente esse preview que motiva o cookie compartilhado entre `app.` e
+`{slug}.` descrito em §5). `reserve_product()` (§7.3) já rejeita reserva para
+qualquer `status <> 'ativa'`, cobrindo `'rascunho'` e `'arquivada'` com a mesma
+mensagem de erro.
+
+**`lists.feat_recados`**, **`lists.feat_rsvp`** e **`lists.feat_notif_email`**
+são `boolean not null default true` — as três seções opcionais da lista
+(recadinhos, RSVP, notificação por e-mail ao criador) vêm ligadas por padrão e o
+creator desliga o que não quiser na aba Configurações. São usadas tanto na
+RLS de `insert` de `messages`/`rsvps` quanto no disparo de e-mail de reserva
+(§7.3, §7.6).
 
 **`products.quantidade`** define quantos convidados podem reservar aquele item no
 total. Não existe um contador redundante — disponibilidade é sempre calculada como
@@ -225,6 +352,17 @@ está correto), o caminho é `cancel_reservation()` (§7.3), não excluir o prod
 
 Leitura pública (guests precisam ver as imagens); escrita restrita por policy de
 storage a quem é dono do `list_id` correspondente (ou ao owner, na pasta `admin/`).
+
+**Limpeza ao excluir produto:** apagar a linha de `products` não apaga o arquivo
+correspondente no Storage — são sistemas diferentes, sem FK entre eles. Como a
+Regra Inviolável #3 obriga excluir+recriar para qualquer correção (inclusive só
+de foto), esse caminho seria usado com alguma frequência e acumularia imagem
+órfã a cada correção sem uma limpeza explícita. Por isso a Server Action de
+exclusão de produto (a mesma que apaga a linha, respeitando a RLS de §7.5) sempre
+chama, na sequência, `storage.from('public-media').remove([...])` para o mesmo
+`product_id` — a policy de storage já permite essa remoção a quem é dono do
+`list_id` (mesma regra de escrita acima), então nenhum privilégio adicional é
+necessário.
 
 ## 7. Segurança e RLS
 
@@ -340,6 +478,14 @@ create unique index reservations_unica_por_convidado
   on public.reservations (product_id, private.normalizar_telefone(guest_telefone))
   where status = 'reservado';
 
+-- contador de rate limit por IP, janela de 1 minuto (fixed window)
+create table private.rate_limit_reserva (
+  ip inet not null,
+  janela timestamptz not null,
+  tentativas int not null default 0,
+  primary key (ip, janela)
+);
+
 create or replace function public.reserve_product(
   p_product_id uuid, p_guest_nome text, p_guest_telefone text
 )
@@ -365,7 +511,41 @@ declare
   v_existente_status text;
   v_nova_id uuid;
   v_nova_status text;
+  v_ip inet;
+  v_tentativas int;
 begin
+  -- rate limit dentro da própria função, não numa camada em volta dela: é a
+  -- única forma de valer também para quem chama a RPC direto do PostgREST
+  -- (`/rest/v1/rpc/reserve_product`, autenticável só com a chave anônima
+  -- pública) sem nunca passar pela Server Action do Next.js — uma Server
+  -- Action só protege o caminho que ela mesma controla. O IP vem do
+  -- primeiro valor de `x-forwarded-for` que o proxy reverso (Traefik, no
+  -- EasyPanel) grava antes de repassar a requisição; se o header não
+  -- existir por algum motivo (chamada fora do fluxo normal), o rate limit
+  -- simplesmente não se aplica (nunca bloqueia por falta de IP, só limita
+  -- quando consegue identificar um)
+  v_ip := nullif(
+    split_part(current_setting('request.headers', true)::json ->> 'x-forwarded-for', ',', 1),
+    ''
+  )::inet;
+  if v_ip is not null then
+    insert into private.rate_limit_reserva (ip, janela, tentativas)
+      values (v_ip, date_trunc('minute', clock_timestamp()), 1)
+      on conflict (ip, janela) do update
+        set tentativas = private.rate_limit_reserva.tentativas + 1
+      returning tentativas into v_tentativas;
+    -- limite generoso de propósito: o produto é usado em eventos físicos
+    -- (aniversário, chá de bebê, casamento) onde vários convidados reais
+    -- costumam dividir o mesmo IP público (Wi-Fi do salão, NAT) numa janela
+    -- curta — um limite agressivo bloquearia reserva legítima. 30
+    -- tentativas/minuto por IP ainda é baixo demais pra varrer uma lista de
+    -- telefones em escala (o vetor descrito abaixo), mas alto o bastante
+    -- pra dificilmente incomodar convidados reais reservando em sequência
+    if v_tentativas > 30 then
+      raise exception 'Muitas tentativas, aguarde um instante e tente novamente';
+    end if;
+  end if;
+
   -- telefone inválido/nulo (poucos dígitos, ou nenhum) normalizaria pra uma
   -- string curta, vazia, ou NULL — sem essa checagem, chamadores diferentes
   -- que mandassem um "telefone" sem dígitos suficientes (ou omitindo o
@@ -396,8 +576,9 @@ begin
   -- erro) variasse com base no telefone testado NUM CENÁRIO DE LISTA
   -- ARQUIVADA, isso vira um oráculo público — "esse telefone reservou algo
   -- nesta lista arquivada?" — testável em escala por qualquer chamador
-  -- anônimo (a função é `grant`ada a `anon`, e não há rate limiting descrito
-  -- em lugar nenhum desta spec), sem deixar rastro nenhum: não cria reserva,
+  -- anônimo (a função é `grant`ada a `anon`; o rate limit acima, no início
+  -- da função, reduz a escala de uma varredura mas não elimina um único
+  -- chute testado uma vez), sem deixar rastro nenhum: não cria reserva,
   -- não consome `quantidade`, não aparece pro creator, não dispara e-mail.
   -- Isso é diferente do caso de uma lista ATIVA: ali um chute errado não é
   -- de graça, cria uma reserva de verdade (visível ao creator, consumindo
@@ -457,6 +638,26 @@ tinha reservado), só o lock de linha + a busca da duplicata, sem contagem nem
 insert. Sem chamadas externas em nenhum dos dois caminhos, seguindo a prática
 recomendada de manter transações curtas para não segurar locks.
 
+**Rate limiting:** implementado dentro da própria `reserve_product()` (acima),
+não numa camada em volta dela — ver o bloco `v_ip`/`private.rate_limit_reserva`
+logo depois do `begin`. Isso não fecha sozinho o raciocínio do comentário acima
+sobre listas arquivadas (um único chute ainda funciona; rate limit só limita
+escala/varredura de vários telefones), mas reduz o mesmo padrão de oráculo para
+o caso de uma lista **ativa**: sem rate limit, um chamador anônimo poderia
+confirmar, sem deixar rastro, se um telefone específico já reservou algo numa
+lista ativa — a chamada que "erra" cria uma reserva real e visível (ruidoso,
+como já dito acima), mas a chamada que "acerta" cai no bloco de idempotência e
+devolve a reserva existente sem nenhum efeito colateral. O rate limit não
+elimina um único chute testado uma vez, mas impede a varredura de uma lista de
+telefones — o cenário de exploração em escala, mesmo risco de desanonimização
+que já justifica o cuidado com a lista arquivada acima. Por morar dentro da
+função (que roda com `security definer`, fora do alcance de qualquer client), o
+limite vale igualmente para uma chamada vinda da Server Action do Next.js e para
+uma chamada direta à RPC do PostgREST — não há caminho que o contorne — e o
+contador fica em tabela do Postgres, não em memória do processo Node, então
+sobrevive a redeploy (o EasyPanel reimplanta a cada `git push`, §3) e funciona
+igual mesmo se o app um dia rodar com mais de uma réplica.
+
 **Cancelar uma reserva individual:** a Regra Inviolável #3 (delete+recreate) é
 sobre o *produto*, não sobre reservas — exigir excluir o produto inteiro pra
 liberar a reserva de um convidado apagaria (via `on delete cascade`, §6) também as
@@ -508,8 +709,11 @@ ficar disponível imediatamente.
 **Onde dispara o e-mail de reserva:** nunca dentro de `reserve_product()` — a
 função fica só com banco, sem chamada externa. Quem chama o Resend é a Server
 Action que o formulário de reserva do guest invoca: ela chama `reserve_product()`
-e só dispara o e-mail se `nova = true` — se `nova = false`, é um retry do mesmo
-convidado e o e-mail já foi enviado na primeira vez. O envio acontece já fora de
+e só dispara o e-mail se `nova = true` **e** a lista tem `feat_notif_email = true`
+— sem essa segunda checagem, um creator que desativou a notificação por e-mail na
+aba Configurações continuaria recebendo e-mail a cada reserva. Se `nova = false`,
+é um retry do mesmo convidado e o e-mail já foi enviado na primeira vez (quando
+aplicável). O envio acontece já fora de
 qualquer transação/lock do Postgres; se o Resend falhar ou demorar, a reserva já
 está confirmada — o pior caso é o creator não receber o e-mail, nunca o guest
 perder a reserva ou receber notificação duplicada.
@@ -549,10 +753,42 @@ seguro desde que:
     sistema, disparado pela ação de qualquer `creator`, não do owner — **não
     passa por `is_owner()`**, porque o creator nunca é dono da plataforma. Essa
     Server Action já usa o cliente admin (service role) diretamente para ler o
-    segredo e chamar a API da loja, sem checagem de papel: o creator nunca vê o
-    valor do segredo, só o resultado (o produto salvo), então não há nada a
-    autorizar além do que a RLS de `products`/`lists` já garante (ele só está
-    criando um produto na própria lista).
+    segredo e chamar a API da loja, sem checagem de papel de owner (o creator
+    nunca vê o valor do segredo, só o resultado). **Isso não dispensa checar
+    que a lista é do creator que está chamando** — o cliente admin ignora RLS
+    por definição, então nada impede um `insert` em qualquer `list_id` que a
+    Server Action receba como parâmetro; e `lists_leitura_autenticada` (§7.6)
+    já deixa qualquer `authenticated` ler o `id` de qualquer lista `'ativa'`,
+    não só as próprias, então um `list_id` de outro creator é algo que um
+    chamador mal-intencionado consegue obter sem esforço. Por isso a Server
+    Action confere explicitamente, antes do `insert`,
+    `select 1 from public.lists where id = p_list_id and owner_id = (select
+    auth.uid())` — mesmo padrão de filtro explícito de `cancel_reservation()`
+    (§7.3) e `update_own_profile()` (§7.2) — e recusa a chamada se não achar
+    linha. Só depois dessa checagem o insert roda. **"O resultado (o produto
+    salvo)" devolvido ao client nunca é a linha inteira** (nunca um `.select('*')` depois
+    do insert) — é sempre um objeto com só os campos que `products_public`
+    também exporia (`id`, `nome`, `descricao`, `preco`, `moeda`, `quantidade`,
+    `imagem_url`, `created_at`, a mesma lista de colunas de §7.6), nunca
+    `link_afiliado`/`link_original`/`marketplace`/`afiliacao_status`. Sem essa
+    regra explícita, um `.insert(...).select()` ingênuo (padrão comum do client
+    do Supabase para devolver a linha criada) devolveria a linha completa no
+    JSON de resposta da Server Action — vazando `link_afiliado` para o browser
+    do creator, violação direta da Regra Inviolável #1.
+
+    A busca automática de dados no `onBlur` (§4) e a conversão de afiliado acima
+    **não são o mesmo passo**, mesmo ocorrendo dentro do fluxo da mesma tela de
+    criação de produto: o `onBlur` só dispara a busca de nome/preço/imagem (a
+    parte de `cheerio`/API de loja usada só para exibição, §8) e devolve ao
+    client apenas esses três campos — nunca um campo de link, nem o original
+    reformatado nem qualquer valor convertido. O campo que o formulário mostra
+    como "link colado" é sempre eco do que o próprio creator digitou (informação
+    que o client já tinha, não um valor vindo do servidor). A conversão de
+    afiliado em si (a chamada que precisa do segredo) só acontece de fato no
+    clique de "salvar", lendo o link diretamente do formulário nesse momento —
+    nunca reaproveitando um valor computado durante o `onBlur`. Isso garante que
+    nenhum valor de link passe do servidor para o client em nenhum ponto do
+    fluxo, antes ou depois de convertido.
 - `SUPABASE_SERVICE_ROLE_KEY` continua sendo a única exceção que fica em variável de
   ambiente pura, porque ela precisa existir antes de qualquer usuário logar.
 
@@ -588,8 +824,8 @@ revoke select on public.reservations from anon, authenticated;
 ### 7.6 Leitura pública
 
 O gate de "essa lista pode ser vista publicamente" é a coluna que já existe em
-`lists`: `status = 'ativa'` (uma lista `arquivada` não é servida no subdomínio
-público).
+`lists`: `status = 'ativa'` (uma lista em `'rascunho'` (ainda não publicada) ou
+`'arquivada'` (evento encerrado) não é servida no subdomínio público).
 
 ```sql
 -- lists: anon só lê listas ativas; nunca lê admin_config, secrets, etc.
@@ -689,18 +925,27 @@ Se a lista não está `ativa` **e** quem está chamando não é o dono dela, dev
 um 404 normal — mesma regra de visibilidade de `lista_visivel()` (§7.6), sem a
 qual um link `/api/go/[productId]` guardado ou compartilhado continuaria
 funcionando para uma lista já arquivada, mesmo com a página pública dela fora
-do ar. Passando por essa checagem: se quem está chamando é o próprio dono da
-lista (`auth.uid() = list.owner_id` — acontece quando o creator visita a
-página pública da própria lista, cenário previsto em §5), o `302` aponta
-sempre para `link_original`, nunca para `link_afiliado`. Para qualquer outro
-visitante (guest, ou creator que não é dono desta lista), o `302` aponta para
-`link_afiliado ?? link_original`. Essa distinção existe porque, diferente de
-um payload JSON, o cabeçalho `Location` de um redirect **é visível no
-browser** (aba Network, `curl -I`, `fetch(..., {redirect: 'manual'})`) —
-devolver sempre `link_afiliado` aqui vazaria o link de afiliado para o próprio
-creator assim que ele clicasse "Ir para a loja" na própria lista, violando a
-Regra Inviolável #1. O valor do link nunca aparece em um payload JSON entregue
-ao browser, em nenhum dos dois casos.
+do ar. Passando por essa checagem, a escolha do link **não** é "dono desta
+lista vs. resto do mundo" — é `(select auth.uid()) is not null` vs. anônimo: se
+a sessão é anônima (`auth.uid() is null`, guest de verdade), o `302` aponta
+para `link_afiliado ?? link_original`; para **qualquer** sessão autenticada
+(qualquer `creator`, dono desta lista ou não, e também o `owner`), o `302`
+aponta sempre para `link_original`, nunca para `link_afiliado`. A Regra
+Inviolável #1 fala do papel `creator` em termos absolutos ("não tem acesso ao
+campo em nenhuma circunstância"), sem ressalva de "só na própria lista" — por
+causa do cookie de sessão compartilhado entre `app.` e `{slug}.` (§5), um
+creator autenticado visitando a página pública de uma lista **de outro
+creator** (ex.: recebeu o link por WhatsApp e abriu no mesmo navegador em que
+está logado no painel) chega a este Route Handler como `authenticated`, então
+checar só "é o dono desta lista?" devolveria `link_afiliado` pra ele mesmo
+assim — exatamente a violação que essa distinção deveria evitar. Essa
+distinção existe porque, diferente de um payload JSON, o cabeçalho `Location`
+de um redirect **é visível no browser** (aba Network, `curl -I`, `fetch(...,
+{redirect: 'manual'})`) — devolver `link_afiliado` pra qualquer sessão
+autenticada vazaria o link de afiliado assim que a pessoa clicasse "Ir para a
+loja" em qualquer lista, sua ou de terceiros, violando a Regra Inviolável #1.
+O valor do link nunca aparece em um payload JSON entregue ao browser, em
+nenhum dos dois casos.
 
 `reservations`: mesmo raciocínio de `products` — a tabela base não tem `grant
 select` para `anon`/`authenticated` (só `insert`, indiretamente, via
@@ -725,15 +970,25 @@ de confirmar que a lista pertence ao usuário logado — não por RLS de `select
 tabela base, pelo mesmo motivo acima (evitar que qualquer `grant select` na base
 vire uma porta de saída para dados que deveriam passar só pela view).
 
-`messages`/`rsvps`: insert público permitido; a leitura usa a mesma
-`private.lista_visivel(list_id)` de `products_public`/`reservations_public`
-(`to anon` e `to authenticated`), não um `using (true)` sem filtro — sem esse
-gate, qualquer chamador anônimo conseguiria ler recadinhos e RSVPs de uma
-lista `arquivada` direto pela API (`/rest/v1/messages?list_id=eq...`), mesmo
-com a página pública dela fora do ar, quebrando a mesma invariante de "lista
-arquivada não é servida publicamente" que vale para `products`/`reservations`.
-São conteúdos que o próprio guest espera ver publicados, mas só enquanto a
-lista está com essa visibilidade.
+`messages`/`rsvps`: a leitura usa a mesma `private.lista_visivel(list_id)` de
+`products_public`/`reservations_public` (`to anon` e `to authenticated`), não
+um `using (true)` sem filtro — sem esse gate, qualquer chamador anônimo
+conseguiria ler recadinhos e RSVPs de uma lista `'arquivada'` **ou ainda em
+`'rascunho'`** direto pela API (`/rest/v1/messages?list_id=eq...`), mesmo com a
+página pública dela fora do ar (arquivada) ou nunca tendo existido para o
+público (rascunho) — a mesma invariante de "só uma lista `'ativa'` é servida
+publicamente" que vale para `products`/`reservations`. São conteúdos que o
+próprio guest espera ver publicados, mas só enquanto a lista está com essa
+visibilidade.
+
+O `insert` de `messages`/`rsvps` não é um `using (true)` liberado sem condição: a
+policy tem `with check` combinando `private.lista_visivel(list_id)` (mesmo motivo
+da leitura — não aceitar recadinho/RSVP numa lista já arquivada ou ainda em
+rascunho) com a flag de feature correspondente da lista (`feat_recados` para
+`messages`, `feat_rsvp` para `rsvps`). Sem essa segunda condição, desligar
+"recadinhos" ou "RSVP" na aba Configurações só esconderia a seção na UI — um
+chamador direto via API (`/rest/v1/messages`) continuaria conseguindo gravar,
+mesmo com a feature desligada pelo creator.
 
 ## 8. Camada de afiliação (server-side)
 
@@ -742,12 +997,40 @@ detecção por domínio, e os quatro comportamentos por loja (Shopee via API ofi
 Shein/Temu/Magalu via rede de afiliados, Amazon e Mercado Livre sem monetização
 automática por ora).
 
+**"Detecção por domínio" é também o gate de segurança do fetch, não só
+roteamento:** antes de fazer qualquer requisição de rede a partir do link que o
+creator colou, o servidor confere o hostname contra a allowlist fixa dos
+marketplaces suportados (Shopee, Shein, Temu, Magalu, Amazon, Mercado Livre) —
+se o hostname não bate com nenhum da lista, a Server Action nem chega a fazer o
+`fetch`, e o formulário cai direto no fallback manual. Sem essa checagem
+**antes** do fetch, o campo de link seria um SSRF: o creator (o papel de menor
+privilégio do sistema) poderia colar uma URL apontando pra dentro da própria
+rede — um endereço interno do Docker/EasyPanel, `http://127.0.0.1:<porta>`, um
+serviço não exposto publicamente — e o servidor faria a requisição a partir de
+dentro da rede interna, devolvendo fragmentos do conteúdo (via `og:title`) de
+volta pro formulário do creator. Se a resposta inicial vier com redirect
+(`3xx`), o hostname final (pós-redirect) também precisa bater com a allowlist
+antes do `cheerio` processar o corpo — não só a URL original — porque um link
+encurtado apontando pra um domínio permitido poderia redirecionar pra um
+destino interno.
+
 **Busca de dados do produto (imagem/título/preço) para lojas fora da Shopee:** feita
-com a biblioteca `cheerio` para ler `og:image`/`og:title`/preço do HTML da página do
-produto (server-side fetch). É uma dependência pequena e padrão de mercado para
-parsing de HTML — mais confiável que regex manual, sem ser uma biblioteca pesada.
-Upload manual de imagem continua como fallback obrigatório (algumas lojas bloqueiam
-scraping).
+com a biblioteca `cheerio` para ler `og:image`/`og:title` do HTML da página do
+produto (server-side fetch, sem executar JavaScript, só depois de passar pela
+checagem de allowlist acima). É uma dependência pequena e
+padrão de mercado para parsing de HTML — mais confiável que regex manual, sem ser
+uma biblioteca pesada. **Preço não tem uma tag Open Graph confiável equivalente**
+(não há convenção amplamente suportada) — a extração de preço é feita por seletor
+CSS específico por loja, dentro do conversor plugável por marketplace, não como um
+terceiro `og:`-tag genérico junto dos outros dois. Upload manual de imagem e
+digitação manual de nome/preço continuam como fallback obrigatório — e, para Shein
+e Temu especificamente (dois dos alvos citados), esse fallback é esperado como
+caminho **comum**, não excepcional: são SPAs que injetam o preço via chamada
+interna depois do carregamento (fora do HTML que um `fetch` simples recebe) e usam
+proteção anti-bot que pode devolver uma página de desafio em vez do produto. O
+fetch do servidor sempre roda com timeout curto (a Server Action do `onBlur` não
+pode travar esperando uma página que nunca responde), e uma falha ou timeout de
+scraping cai direto no formulário manual, sem erro para o creator.
 
 **Popup de WhatsApp** (quando `afiliacao_status` ∈ {`sem_api`, `sem_autorizacao`,
 `nao_aplicavel`}): mantido como especificado, texto sem menção a comissão/afiliação,
@@ -762,8 +1045,8 @@ número em si para o popup, nunca o restante de `admin_config`.
 Conforme spec original (seção 8), sem alterações — mantidas aqui por referência:
 
 - **owner:** config de afiliados/APIs, tabela de usuários (cadastro, ativar/
-  inativar, excluir, reset de senha via Supabase Auth), banner promocional,
-  WhatsApp de contato.
+  inativar, excluir — comportamento de cada ação em §6 — reset de senha via
+  Supabase Auth), banner promocional, WhatsApp de contato.
 - **creator:** auth por e-mail/senha (sem Google), minhas listas, criar lista (2
   passos), abas dentro da lista (Presentes, Recadinhos, Convidados, Compartilhar,
   Info. do Evento, Aparência, Configurações) — nunca vê nada de afiliação.
@@ -793,7 +1076,10 @@ Estado atual (checado nesta conversa): nada provisionado ainda para este projeto
   nenhum app já configurado lá. Deploy via git push, seguindo o fluxo padrão do
   EasyPanel (Docker + build automático).
 - **Local:** `npm run dev` com Next.js, apontando para o projeto Supabase novo via
-  `.env.local` (nunca commitado). Subdomínios testados via `*.localhost` (§5).
+  `.env.local` (nunca commitado). Subdomínios testados via `*.localhost` para
+  renderização isolada, e via `app.garimpo.test`/`teste.garimpo.test` (entradas
+  fixas no `/etc/hosts`) quando o teste depender da sessão compartilhada entre
+  `app.` e `{slug}.` (§5).
 
 ## 11. Roadmap de implementação
 
@@ -808,11 +1094,19 @@ para revisão):
   editor do Supabase — não é necessário construir uma ferramenta de seed separada
   para isso.
 - **Fase 2 — Criador:** minhas listas, criar lista (2 passos), abas da lista, sem
-  nenhuma informação de afiliação.
+  nenhuma informação de afiliação. O modal de adicionar presente nesta fase salva
+  o produto de forma manual — creator digita nome/preço e faz upload manual da
+  imagem, sem busca automática (`onBlur`) nem conversão de afiliado ainda
+  (`link_afiliado` fica `null`); a Fase 4 traz o conversor e o `onBlur`. Como o
+  app ainda não está em produção nesta fase (o deploy só acontece na Fase 6), os
+  produtos criados aqui são dados de teste do próprio dono validando a UI, sem
+  conflito com a Regra Inviolável #3: nenhum produto real de usuário existe ainda
+  para "editar".
 - **Fase 3 — Página pública + subdomínios:** middleware (§5), renderização pública
   por slug, `reserve_product()` (§7.3), Route Handler de redirect de compra (§7.6).
-- **Fase 4 — Afiliação:** conversores por marketplace, começando por Shopee
-  (API oficial). A tela de admin pra cadastrar credenciais só é construída na
+- **Fase 4 — Afiliação:** conversores por marketplace, começando por Shopee (API
+  oficial), e o `onBlur` de busca automática (§4, §7.4) que passa a substituir a
+  digitação manual da Fase 2. A tela de admin pra cadastrar credenciais só é construída na
   Fase 5 — então, pra testar a conversão Shopee nesta fase, as credenciais reais
   são inseridas direto via SQL editor do Supabase (mesmo espírito do bootstrap
   manual do primeiro owner na Fase 1): `shopee_app_id` com um `update
