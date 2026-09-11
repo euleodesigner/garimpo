@@ -46,3 +46,6 @@ next-env.d.ts
 # documentação do projeto, não deve ser versionado
 /AGENTS.md
 /CLAUDE.md
+
+# artefatos de teste do MCP do Playwright (screenshots, logs de console)
+/.playwright-mcp/

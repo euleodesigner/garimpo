@@ -52,27 +52,39 @@ export async function adicionarPresente(
     .maybeSingle();
   if (!lista) return { erro: "Lista não encontrada." };
 
-  const { data: produto, error } = await supabase
-    .from("products")
-    .insert({ list_id: listaId, nome, preco, link_original: link, quantidade: 1 })
-    .select("id")
-    .single();
-
-  if (error || !produto) {
-    return { erro: "Não foi possível salvar o presente. Tente de novo." };
-  }
+  // `products` não tem policy de select nem de update pra creator (spec
+  // §7.5, Regra Inviolável #3 -- produto é imutável depois de criado) --
+  // por isso o id é gerado aqui e a imagem sobe ANTES do insert: um
+  // `.insert().select()` exigiria privilégio de leitura que a tabela não
+  // concede, e um `.update()` depois do insert seria bloqueado pela RLS
+  // (não existe policy de update pra ninguém além do owner da plataforma)
+  const produtoId = crypto.randomUUID();
+  let imagemUrl: string | null = null;
 
   if (imagem && imagem.size > 0 && imagem.type.startsWith("image/")) {
     const ext = extensaoSegura(imagem.name);
-    const path = `products/${listaId}/${produto.id}.${ext}`;
+    const path = `products/${listaId}/${produtoId}.${ext}`;
     const { error: uploadError } = await supabase.storage
       .from("public-media")
       .upload(path, imagem, { upsert: true });
-
     if (!uploadError) {
       const { data: pub } = supabase.storage.from("public-media").getPublicUrl(path);
-      await supabase.from("products").update({ imagem_url: pub.publicUrl }).eq("id", produto.id);
+      imagemUrl = pub.publicUrl;
     }
+  }
+
+  const { error } = await supabase.from("products").insert({
+    id: produtoId,
+    list_id: listaId,
+    nome,
+    preco,
+    link_original: link,
+    quantidade: 1,
+    imagem_url: imagemUrl,
+  });
+
+  if (error) {
+    return { erro: "Não foi possível salvar o presente. Tente de novo." };
   }
 
   revalidatePath(`/listas/${listaId}/presentes`);

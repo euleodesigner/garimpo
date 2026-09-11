@@ -33,7 +33,7 @@ export async function reservar(
   return { ok: true };
 }
 
-type SimpleState = { erro?: string } | undefined;
+type SimpleState = { erro?: string; ok?: boolean } | undefined;
 
 export async function enviarRecado(
   slug: string,
@@ -50,6 +50,7 @@ export async function enviarRecado(
   if (error) return { erro: "Não foi possível enviar. Tente de novo." };
 
   revalidatePath(`/l/${slug}`);
+  return { ok: true };
 }
 
 export async function confirmarPresenca(
@@ -72,4 +73,5 @@ export async function confirmarPresenca(
   if (error) return { erro: "Não foi possível confirmar. Tente de novo." };
 
   revalidatePath(`/l/${slug}`);
+  return { ok: true };
 }

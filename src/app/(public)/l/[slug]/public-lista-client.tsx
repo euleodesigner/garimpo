@@ -245,6 +245,9 @@ function RecadinhosTab({
           className="mt-2.5 min-h-20 w-full rounded-lg border border-line bg-white px-3.5 py-2.5 text-sm text-ink"
         />
         <FieldError>{state?.erro}</FieldError>
+        {state?.ok && (
+          <p className="mt-1.5 text-sm font-semibold text-jade">✓ Recadinho enviado!</p>
+        )}
         <ButtonPrimary type="submit" disabled={pending} className="mt-3">
           {pending ? "Enviando…" : "Enviar recadinho"}
         </ButtonPrimary>
@@ -265,6 +268,14 @@ function RecadinhosTab({
 function RsvpTab({ slug, listaId }: { slug: string; listaId: string }) {
   const acao = confirmarPresenca.bind(null, slug, listaId);
   const [state, formAction, pending] = useActionState(acao, undefined);
+
+  if (state?.ok) {
+    return (
+      <div className="mt-5 rounded-2xl border border-line bg-card p-4 text-center">
+        <p className="text-sm font-semibold text-jade">✓ Presença confirmada, obrigado!</p>
+      </div>
+    );
+  }
 
   return (
     <form action={formAction} className="mt-5 rounded-2xl border border-line bg-card p-4">

@@ -19,12 +19,16 @@ function getSubdomain(hostname: string): string | null {
   return null;
 }
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const hostname = request.headers.get("host")?.split(":")[0].toLowerCase() ?? "";
   const subdomain = getSubdomain(hostname);
 
-  // sem subdomínio, ou app./www. -- contexto do painel, passa direto
-  if (!subdomain || subdomain === "app" || subdomain === "www") {
+  // sem subdomínio, app./www., ou rota de API -- passa direto. Rotas de
+  // API (ex.: /api/go/[productId], o redirect de compra) são globais e
+  // não fazem parte do grupo público por slug -- sem essa exceção, um link
+  // relativo /api/go/... chamado a partir de qualquer subdomínio de lista
+  // seria reescrito pra /l/{slug}/api/go/..., que não existe (404).
+  if (!subdomain || subdomain === "app" || subdomain === "www" || request.nextUrl.pathname.startsWith("/api/")) {
     return await updateSession(request);
   }
 
