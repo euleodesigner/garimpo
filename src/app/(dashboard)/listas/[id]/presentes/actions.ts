@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { baixarImagemExterna } from "@/lib/marketplace";
 import { resolverAfiliacao } from "@/lib/afiliacao";
 
@@ -98,9 +99,13 @@ export async function adicionarPresente(
   // durante o onBlur (busca automática de nome/preço/imagem, acima). Lê a
   // credencial via RPC security definer (Task 1) -- não passa por
   // is_owner(), porque quem está salvando é o creator, nunca o owner.
-  const { data: credRow } = await supabase
+  const adminSupabase = createAdminClient();
+  const { data: credRow, error: credError } = await adminSupabase
     .rpc("credenciais_shopee")
     .maybeSingle<{ app_id: string | null; app_secret: string | null }>();
+  if (credError) {
+    console.error("Falha ao ler credencial Shopee:", credError.message);
+  }
   const credenciaisShopee =
     credRow?.app_id && credRow?.app_secret
       ? { appId: credRow.app_id, appSecret: credRow.app_secret }
