@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { baixarImagemExterna } from "@/lib/marketplace";
+import { resolverAfiliacao } from "@/lib/afiliacao";
 
 type State = { erro?: string; ok?: boolean } | undefined;
 
@@ -92,6 +93,27 @@ export async function adicionarPresente(
     }
   }
 
+  // Conversão de afiliado (spec §7.4): roda aqui, no clique de salvar, lendo
+  // `link` direto do formulário -- nunca reaproveita nenhum valor computado
+  // durante o onBlur (busca automática de nome/preço/imagem, acima). Lê a
+  // credencial via RPC security definer (Task 1) -- não passa por
+  // is_owner(), porque quem está salvando é o creator, nunca o owner.
+  const { data: credRow } = await supabase
+    .rpc("credenciais_shopee")
+    .maybeSingle<{ app_id: string | null; app_secret: string | null }>();
+  const credenciaisShopee =
+    credRow?.app_id && credRow?.app_secret
+      ? { appId: credRow.app_id, appSecret: credRow.app_secret }
+      : null;
+  const { marketplace, linkAfiliado, afiliacaoStatus } = await resolverAfiliacao(
+    link,
+    credenciaisShopee,
+  );
+
+  // "O resultado devolvido ao client nunca é a linha inteira" (spec §7.4) --
+  // por isso este insert nunca encadeia .select(): devolver a linha criada
+  // vazaria link_afiliado/link_original/marketplace/afiliacao_status pro
+  // browser do creator, violando a Regra Inviolável #1.
   const { error } = await supabase.from("products").insert({
     id: produtoId,
     list_id: listaId,
@@ -100,6 +122,9 @@ export async function adicionarPresente(
     link_original: link,
     quantidade: 1,
     imagem_url: imagemUrl,
+    marketplace,
+    link_afiliado: linkAfiliado,
+    afiliacao_status: afiliacaoStatus,
   });
 
   if (error) {
