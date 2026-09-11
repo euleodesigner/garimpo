@@ -82,6 +82,20 @@ export async function buscarDadosProduto(url: string): Promise<DadosProduto | { 
  * outra loja reconhecida (Shein/Temu/Magalu/Amazon/Mercado Livre) sempre
  * oferece o atalho nesta fase. Loja não reconhecida -> sem oferta (nada pra
  * "achar mais barato" numa loja que o sistema nem identifica).
+ *
+ * Cobertura honesta dos 3 estados do §8 (limitação estrutural, não bug):
+ * como esta decisão roda no onBlur -- antes de qualquer tentativa real de
+ * conversão, que só acontece no clique de salvar (§7.4) -- ela cobre
+ * sem_api e nao_aplicavel de forma confiável (dependem só de "existe
+ * credencial configurada?", conhecível no onBlur), mas NUNCA detecta
+ * sem_autorizacao (Shopee configurada e a conversão falhando de verdade na
+ * hora de salvar): esse caso só existiria depois do clique de salvar, e
+ * mover o popup pra lá violaria a regra do §7.4 de nunca reaproveitar um
+ * valor computado durante o onBlur. Hoje isso é invisível porque não há
+ * credencial Shopee configurada ainda (shopee_configurado() sempre falso);
+ * passa a ser uma lacuna real assim que a Fase 5 (tela de admin) permitir
+ * configurar credencial e ela começar a falhar em produção -- ainda sem
+ * solução definida.
  */
 async function resolverOfertaWhatsapp(url: string): Promise<{ numero: string } | null> {
   const marketplace = detectarMarketplace(url);

@@ -11,9 +11,12 @@ export type ResultadoAfiliacao = {
 
 /**
  * Decide marketplace/link_afiliado/afiliacao_status pra um link colado pelo
- * creator (spec §7.4/§8/§11 Fase 4). `converter` é injetável só pra permitir
- * verificar esta função sem depender de rede real na Shopee -- em produção
- * sempre usa converterLinkShopee (valor default do parâmetro).
+ * creator (spec §7.4/§8/§11 Fase 4). `carregarCredenciais` é um loader
+ * preguiçoso -- só é invocado dentro do ramo Shopee, então uma loja que não
+ * é Shopee nunca paga o custo de decriptar o Vault (RPC credenciais_shopee())
+ * à toa. `converter` é injetável só pra permitir verificar esta função sem
+ * depender de rede real na Shopee -- em produção sempre usa
+ * converterLinkShopee (valor default do parâmetro).
  *
  * Amazon/Mercado Livre: nao_aplicavel sempre -- sem programa de monetização
  * automática por decisão de negócio (§8), não é "falta de credencial".
@@ -26,7 +29,7 @@ export type ResultadoAfiliacao = {
  */
 export async function resolverAfiliacao(
   url: string,
-  credenciaisShopee: CredenciaisShopee | null,
+  carregarCredenciais: () => Promise<CredenciaisShopee | null>,
   converter: typeof converterLinkShopee = converterLinkShopee,
 ): Promise<ResultadoAfiliacao> {
   const marketplace = detectarMarketplace(url);
@@ -36,6 +39,7 @@ export async function resolverAfiliacao(
   }
 
   if (marketplace === "shopee") {
+    const credenciaisShopee = await carregarCredenciais();
     if (!credenciaisShopee) {
       return { marketplace, linkAfiliado: null, afiliacaoStatus: "sem_api" };
     }

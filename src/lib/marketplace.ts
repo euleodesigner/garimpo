@@ -117,8 +117,11 @@ const PADROES_HOST_PRIVADO = [
   /^169\.254\./,
   /^0\.0\.0\.0$/,
   /^\[?::1\]?$/,
-  /^\[?fc[0-9a-f]{2}:/i,
+  /^\[?f[cd][0-9a-f]{2}:/i,
   /^\[?fe80:/i,
+  /^\[?::ffff:/i,
+  /^\[?::\]?$/,
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
 ];
 
 function pareceHostPrivado(hostname: string): boolean {
