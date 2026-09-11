@@ -3,24 +3,51 @@
 // de link vira um SSRF -- o creator (menor privilégio do sistema) poderia
 // colar uma URL apontando pra dentro da rede interna. Por isso o hostname é
 // checado ANTES de qualquer fetch, inclusive a cada hop de redirect.
-const DOMINIOS_PERMITIDOS = [
-  "shopee.com.br",
-  "shopee.com",
-  "shein.com",
-  "shein.com.br",
-  "temu.com",
-  "magazineluiza.com.br",
-  "magalu.com",
-  "amazon.com.br",
-  "amazon.com",
-  "amzn.to",
-  "mercadolivre.com.br",
-  "mercadolibre.com",
-];
+//
+// O mesmo mapa também alimenta detectarMarketplace() (usado pela conversão
+// de afiliado, §7.4/§8) -- domínio permitido e marketplace detectado são a
+// mesma pergunta ("essa URL é de uma loja que reconhecemos?"), então ficam
+// numa fonte só pra não haver duas listas de domínio divergindo com o tempo.
+export type MarketplaceSlug = "shopee" | "shein" | "temu" | "magalu" | "amazon" | "mercado_livre";
+
+const MARKETPLACE_POR_DOMINIO: Record<string, MarketplaceSlug> = {
+  "shopee.com.br": "shopee",
+  "shopee.com": "shopee",
+  "shein.com": "shein",
+  "shein.com.br": "shein",
+  "temu.com": "temu",
+  "magazineluiza.com.br": "magalu",
+  "magalu.com": "magalu",
+  "amazon.com.br": "amazon",
+  "amazon.com": "amazon",
+  "amzn.to": "amazon",
+  "mercadolivre.com.br": "mercado_livre",
+  "mercadolibre.com": "mercado_livre",
+};
 
 export function hostnamePermitido(hostname: string): boolean {
   const h = hostname.toLowerCase();
-  return DOMINIOS_PERMITIDOS.some((d) => h === d || h.endsWith(`.${d}`));
+  return Object.keys(MARKETPLACE_POR_DOMINIO).some((d) => h === d || h.endsWith(`.${d}`));
+}
+
+/**
+ * Devolve o marketplace detectado pelo hostname da URL, ou null se não é uma
+ * loja reconhecida. Não faz nenhum request de rede -- só parsing de URL --
+ * então pode ser chamada com segurança a partir de qualquer Server Action,
+ * sem risco de SSRF (quem faz request de verdade é fetchSeguro, abaixo, que
+ * já valida a allowlist antes de qualquer fetch).
+ */
+export function detectarMarketplace(url: string): MarketplaceSlug | null {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  for (const [dominio, slug] of Object.entries(MARKETPLACE_POR_DOMINIO)) {
+    if (hostname === dominio || hostname.endsWith(`.${dominio}`)) return slug;
+  }
+  return null;
 }
 
 export function urlDeLojaSuportada(url: string): boolean {
