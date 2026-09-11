@@ -4,6 +4,7 @@ import { useActionState, useEffect, useRef, useState } from "react";
 import { adicionarPresente } from "./actions";
 import { buscarDadosProduto } from "./buscar-dados-action";
 import { Input, Label, ButtonPrimary, FieldError } from "@/components/ui";
+import type { DadosProduto } from "./buscar-dados-action";
 
 export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClose: () => void }) {
   const acao = adicionarPresente.bind(null, listaId);
@@ -13,6 +14,7 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
   const [preco, setPreco] = useState("");
   const [buscando, setBuscando] = useState(false);
   const [imagemAutoUrl, setImagemAutoUrl] = useState<string | null>(null);
+  const [ofertaWhatsapp, setOfertaWhatsapp] = useState<DadosProduto["ofertaWhatsapp"]>(null);
   const [imagemPreviewLocal, setImagemPreviewLocal] = useState<string | null>(null);
   const [nomeArquivo, setNomeArquivo] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -31,6 +33,7 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
       if (!nome && resultado.titulo) setNome(resultado.titulo);
       if (!preco && resultado.preco != null) setPreco(String(resultado.preco).replace(".", ","));
       if (resultado.imagem) setImagemAutoUrl(resultado.imagem);
+      setOfertaWhatsapp(resultado.ofertaWhatsapp);
     } finally {
       setBuscando(false);
     }
@@ -139,6 +142,46 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
             </ButtonPrimary>
           </div>
         </form>
+
+        {ofertaWhatsapp && (
+          <div
+            onClick={() => setOfertaWhatsapp(null)}
+            className="fixed inset-0 z-[60] grid place-items-center bg-ink/60 p-4"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-sm rounded-2xl bg-card p-6 text-center"
+            >
+              <div className="mb-2 text-4xl">🔎</div>
+              <h3 className="text-lg font-extrabold text-ink">
+                Achamos que dá para pagar menos nesse produto
+              </h3>
+              <p className="mt-2 text-sm text-sub">
+                Você pode encontrar um cupom ou um link mais barato desse produto com a gente.
+                Deseja entrar em contato?
+              </p>
+              <a
+                href={`https://wa.me/${ofertaWhatsapp.numero}?text=${encodeURIComponent(
+                  "Olá, vim do Lista Garimpo e quero um link com desconto para este produto: " +
+                    (document.querySelector<HTMLInputElement>('input[name="link"]')?.value ?? ""),
+                )}`}
+                target="_blank"
+                rel="noreferrer"
+                onClick={() => setOfertaWhatsapp(null)}
+                className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-whatsapp py-3.5 text-sm font-extrabold text-white"
+              >
+                🟢 Entrar em contato
+              </a>
+              <button
+                type="button"
+                onClick={() => setOfertaWhatsapp(null)}
+                className="mt-3 w-full py-2.5 text-xs font-semibold text-sub"
+              >
+                Agora não, seguir com este link
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
