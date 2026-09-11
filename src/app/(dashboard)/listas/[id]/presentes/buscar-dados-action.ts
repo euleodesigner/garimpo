@@ -1,0 +1,117 @@
+"use server";
+
+import * as cheerio from "cheerio";
+import { fetchSeguro, urlDeLojaSuportada, detectarMarketplace } from "@/lib/marketplace";
+import { createClient } from "@/lib/supabase/server";
+
+export type DadosProduto = {
+  titulo: string | null;
+  imagem: string | null;
+  preco: number | null;
+  // Sinal pro modal oferecer o atalho de WhatsApp (spec §8) -- nunca o
+  // marketplace detectado nem o afiliacao_status em si (Regra Inviolável
+  // #2): o client só sabe "hoje dá pra pedir um link com desconto nesta
+  // loja" + o número, nunca por quê nem em qual loja.
+  ofertaWhatsapp: { numero: string } | null;
+};
+
+// Busca automática de nome/imagem/preço ao sair do campo de link (spec §4,
+// §8) -- nunca inclui qualquer campo de link (original ou convertido), só
+// os três campos de exibição. A conversão de afiliado em si (que precisa
+// das credenciais reais das lojas) fica pra quando essas credenciais
+// existirem -- aqui só lemos og:title/og:image/preço público da página.
+export async function buscarDadosProduto(url: string): Promise<DadosProduto | { erro: string }> {
+  if (!url.trim()) return { erro: "Cole um link primeiro." };
+
+  const ofertaWhatsapp = await resolverOfertaWhatsapp(url);
+
+  if (!urlDeLojaSuportada(url)) {
+    // loja fora da allowlist -- não é erro, só não dá pra buscar
+    // automaticamente; o formulário cai no preenchimento manual
+    return { titulo: null, imagem: null, preco: null, ofertaWhatsapp };
+  }
+
+  const res = await fetchSeguro(url);
+  if (!res || !res.ok) {
+    return { titulo: null, imagem: null, preco: null, ofertaWhatsapp };
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("text/html")) {
+    return { titulo: null, imagem: null, preco: null, ofertaWhatsapp };
+  }
+
+  let html: string;
+  try {
+    html = await res.text();
+  } catch {
+    return { titulo: null, imagem: null, preco: null, ofertaWhatsapp };
+  }
+
+  const $ = cheerio.load(html);
+  const titulo =
+    $('meta[property="og:title"]').attr("content")?.trim() ||
+    $("title").text().trim() ||
+    null;
+  const imagem = $('meta[property="og:image"]').attr("content")?.trim() || null;
+
+  // preço não tem tag Open Graph amplamente suportada (spec §8) -- tenta as
+  // variantes mais comuns, mas o fallback manual é esperado com frequência,
+  // principalmente em SPAs (Shein/Temu) que só injetam o preço via JS
+  const precoTexto =
+    $('meta[property="product:price:amount"]').attr("content") ||
+    $('meta[property="og:price:amount"]').attr("content") ||
+    $('[itemprop="price"]').attr("content") ||
+    null;
+  const preco = precoTexto ? Number(precoTexto.replace(",", ".")) : null;
+
+  return {
+    titulo,
+    imagem,
+    preco: preco != null && !Number.isNaN(preco) ? preco : null,
+    ofertaWhatsapp,
+  };
+}
+
+/**
+ * Decide se oferece o atalho de WhatsApp (spec §8: quando afiliacao_status
+ * ficaria sem_api/sem_autorizacao/nao_aplicavel) sem nunca calcular nem
+ * expor o afiliacao_status de verdade aqui -- só a pergunta booleana "essa
+ * loja converte automaticamente hoje?". Shopee só conta como "converte" se
+ * já há credencial configurada (private.shopee_configurado()); qualquer
+ * outra loja reconhecida (Shein/Temu/Magalu/Amazon/Mercado Livre) sempre
+ * oferece o atalho nesta fase. Loja não reconhecida -> sem oferta (nada pra
+ * "achar mais barato" numa loja que o sistema nem identifica).
+ *
+ * Cobertura honesta dos 3 estados do §8 (limitação estrutural, não bug):
+ * como esta decisão roda no onBlur -- antes de qualquer tentativa real de
+ * conversão, que só acontece no clique de salvar (§7.4) -- ela cobre
+ * sem_api e nao_aplicavel de forma confiável (dependem só de "existe
+ * credencial configurada?", conhecível no onBlur), mas NUNCA detecta
+ * sem_autorizacao (Shopee configurada e a conversão falhando de verdade na
+ * hora de salvar): esse caso só existiria depois do clique de salvar, e
+ * mover o popup pra lá violaria a regra do §7.4 de nunca reaproveitar um
+ * valor computado durante o onBlur. Hoje isso é invisível porque não há
+ * credencial Shopee configurada ainda (shopee_configurado() sempre falso);
+ * passa a ser uma lacuna real assim que a Fase 5 (tela de admin) permitir
+ * configurar credencial e ela começar a falhar em produção -- ainda sem
+ * solução definida.
+ */
+async function resolverOfertaWhatsapp(url: string): Promise<{ numero: string } | null> {
+  const marketplace = detectarMarketplace(url);
+  if (!marketplace) return null;
+
+  const supabase = await createClient();
+
+  if (marketplace === "shopee") {
+    const { data: configurado } = await supabase.rpc("shopee_configurado");
+    if (configurado) return null;
+  }
+
+  const { data: banner } = await supabase
+    .from("banner_publico")
+    .select("whatsapp_numero")
+    .maybeSingle();
+
+  return banner?.whatsapp_numero ? { numero: banner.whatsapp_numero } : null;
+}

@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #F5F0E8;
+  --color-ink: #241E17;
+  --color-sub: #6B5D4F;
+  --color-card: #FFFDF9;
+  --color-line: #E2D8C8;
+  --color-clay: #B4552D;
+  --color-jade: #1F6F5C;
+  --color-gold: #C08A2D;
+  --color-danger: #A8352B;
+  --color-whatsapp: #25D366;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+}
