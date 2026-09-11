@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { baixarImagemExterna } from "@/lib/marketplace";
 
 type State = { erro?: string; ok?: boolean } | undefined;
 
@@ -13,9 +14,12 @@ function extensaoSegura(nomeArquivo: string): string {
   return EXTENSOES_IMAGEM_PERMITIDAS.has(bruta) ? bruta : "jpg";
 }
 
-// Fase 2 do roteiro: cadastro manual, sem busca automática (onBlur) nem
-// conversão de afiliado ainda -- link_afiliado fica null. O conversor
-// plugável por marketplace entra na Fase 4.
+// Busca automática (onBlur, spec §4/§8) preenche nome/preço/imagem no
+// client antes de salvar -- link_afiliado continua null aqui, a conversão
+// de afiliado em si só entra quando houver credencial real de loja (Fase 4
+// completa). "imagemUrlAuto" é o og:image já extraído pelo onBlur; se o
+// creator não subir um arquivo manual, essa imagem é baixada e resalva no
+// nosso Storage (nunca hotlink direto).
 export async function adicionarPresente(
   listaId: string,
   _prevState: State,
@@ -25,6 +29,7 @@ export async function adicionarPresente(
   const precoStr = String(formData.get("preco") ?? "").replace(",", ".").trim();
   const link = String(formData.get("link") ?? "").trim();
   const imagem = formData.get("imagem") as File | null;
+  const imagemUrlAuto = String(formData.get("imagemUrlAuto") ?? "").trim();
 
   if (!nome || !link) {
     return { erro: "Preencha o nome e o link do produto." };
@@ -70,6 +75,20 @@ export async function adicionarPresente(
     if (!uploadError) {
       const { data: pub } = supabase.storage.from("public-media").getPublicUrl(path);
       imagemUrl = pub.publicUrl;
+    }
+  } else if (imagemUrlAuto) {
+    const baixada = await baixarImagemExterna(imagemUrlAuto);
+    if (baixada) {
+      const ext = baixada.contentType.split("/")[1]?.split(";")[0] ?? "jpg";
+      const extSegura = extensaoSegura(`arquivo.${ext}`);
+      const path = `products/${listaId}/${produtoId}.${extSegura}`;
+      const { error: uploadError } = await supabase.storage
+        .from("public-media")
+        .upload(path, baixada.bytes, { upsert: true, contentType: baixada.contentType });
+      if (!uploadError) {
+        const { data: pub } = supabase.storage.from("public-media").getPublicUrl(path);
+        imagemUrl = pub.publicUrl;
+      }
     }
   }
 
