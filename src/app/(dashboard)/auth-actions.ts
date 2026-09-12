@@ -10,11 +10,25 @@ export async function login(_prevState: AuthState, formData: FormData): Promise<
   const senha = String(formData.get("senha") ?? "");
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password: senha });
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password: senha });
 
   if (error) {
     console.error("[login] falha ao autenticar via Supabase:", error.message);
     return { erro: "E-mail ou senha inválidos." };
+  }
+
+  // status/excluido_em existem desde a Fase 1 mas nunca eram checados aqui --
+  // o admin podia "desativar"/"excluir" um creator pelo painel e a conta
+  // continuava logando normalmente.
+  const { data: perfil } = await supabase
+    .from("profiles")
+    .select("status, excluido_em")
+    .eq("id", data.user.id)
+    .maybeSingle();
+
+  if (perfil && (perfil.status === "inativo" || perfil.excluido_em)) {
+    await supabase.auth.signOut();
+    return { erro: "Sua conta está desativada. Entre em contato com o suporte." };
   }
 
   redirect("/listas");

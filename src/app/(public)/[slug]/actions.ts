@@ -29,7 +29,7 @@ export async function reservar(
     return { erro: error.message || "Não foi possível reservar este item." };
   }
 
-  revalidatePath(`/l/${slug}`);
+  revalidatePath(`/${slug}`);
   return { ok: true };
 }
 
@@ -49,7 +49,7 @@ export async function enviarRecado(
   const { error } = await supabase.from("messages").insert({ list_id: listaId, nome, texto });
   if (error) return { erro: "Não foi possível enviar. Tente de novo." };
 
-  revalidatePath(`/l/${slug}`);
+  revalidatePath(`/${slug}`);
   return { ok: true };
 }
 
@@ -72,6 +72,6 @@ export async function confirmarPresenca(
     .insert({ list_id: listaId, nome, presente, acompanhantes });
   if (error) return { erro: "Não foi possível confirmar. Tente de novo." };
 
-  revalidatePath(`/l/${slug}`);
+  revalidatePath(`/${slug}`);
   return { ok: true };
 }
