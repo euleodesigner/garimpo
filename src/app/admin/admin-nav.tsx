@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 
 const ABAS = [
   ["usuarios", "👥 Usuários"],
+  ["afiliados", "🔑 Afiliados"],
   ["config", "🛠️ Configurações"],
 ] as const;
 
