@@ -13,6 +13,7 @@ export async function login(_prevState: AuthState, formData: FormData): Promise<
   const { error } = await supabase.auth.signInWithPassword({ email, password: senha });
 
   if (error) {
+    console.error("[login] falha ao autenticar via Supabase:", error.message);
     return { erro: "E-mail ou senha inválidos." };
   }
 

@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { getSupabaseUrl } from "./url";
 
 // Domínio-base do cookie de sessão (spec §5 "Sessão compartilhada"):
 // - produção: .listagarimpo.com.br (via NEXT_PUBLIC_ROOT_DOMAIN)
@@ -26,7 +27,7 @@ export async function updateSession(request: NextRequest) {
   const domain = cookieDomainFor(hostname);
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    getSupabaseUrl(),
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookieOptions: {

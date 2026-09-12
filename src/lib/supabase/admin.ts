@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { getSupabaseUrl } from "./url";
 
 /**
  * Cliente Supabase com a Service Role Key -- ignora RLS, usa o papel
@@ -11,7 +12,7 @@ import { createClient } from "@supabase/supabase-js";
  */
 export function createAdminClient() {
   return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    getSupabaseUrl(),
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } },
   );
