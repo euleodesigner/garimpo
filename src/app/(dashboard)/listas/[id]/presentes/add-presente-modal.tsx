@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { Fragment, useActionState, useEffect, useRef, useState } from "react";
 import { adicionarPresente } from "./actions";
 import { buscarDadosProduto } from "./buscar-dados-action";
 import { Input, Label, ButtonPrimary, FieldError } from "@/components/ui";
@@ -164,7 +164,7 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
 
           <div className="mt-6 flex justify-end gap-2.5">
             {!emRevisao ? (
-              <>
+              <Fragment key="editar">
                 <button
                   type="button"
                   onClick={onClose}
@@ -174,15 +174,25 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
                 </button>
                 <ButtonPrimary
                   type="button"
-                  onClick={() => {
+                  onClick={(e) => {
+                    // Nunca deixar esse clique "vazar" pra um submit real: em
+                    // alguns motores de navegador, se o mesmo <button> vira
+                    // type="submit" no re-render causado por este handler
+                    // (troca de tela pra revisão), o clique original acaba
+                    // sendo tratado como o clique que confirmou o envio --
+                    // preventDefault() aqui bloqueia isso, e o key="editar"/
+                    // key="revisao" acima força o React a trocar de nó de
+                    // verdade em vez de só mudar o atributo "type" no mesmo
+                    // elemento.
+                    e.preventDefault();
                     if (formRef.current?.reportValidity()) setRevisando(true);
                   }}
                 >
                   Salvar presente
                 </ButtonPrimary>
-              </>
+              </Fragment>
             ) : (
-              <>
+              <Fragment key="revisao">
                 <button
                   type="button"
                   onClick={() => setRevisando(false)}
@@ -193,7 +203,7 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
                 <ButtonPrimary type="submit" disabled={pending}>
                   {pending ? "Salvando…" : "Confirmar e salvar"}
                 </ButtonPrimary>
-              </>
+              </Fragment>
             )}
           </div>
         </form>
