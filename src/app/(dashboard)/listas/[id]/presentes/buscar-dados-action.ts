@@ -77,25 +77,18 @@ export async function buscarDadosProduto(url: string): Promise<DadosProduto | { 
  * Decide se oferece o atalho de WhatsApp (spec §8: quando afiliacao_status
  * ficaria sem_api/sem_autorizacao/nao_aplicavel) sem nunca calcular nem
  * expor o afiliacao_status de verdade aqui -- só a pergunta booleana "essa
- * loja converte automaticamente hoje?". Shopee só conta como "converte" se
- * já há credencial configurada (private.shopee_configurado()); qualquer
- * outra loja reconhecida (Shein/Temu/Magalu/Amazon/Mercado Livre) sempre
- * oferece o atalho nesta fase. Loja não reconhecida -> sem oferta (nada pra
- * "achar mais barato" numa loja que o sistema nem identifica).
+ * loja converte automaticamente hoje?", via loja_afiliado_habilitada() (RPC
+ * pública, sem segredo, lê só a flag `habilitado` da loja detectada -- vale
+ * pra qualquer loja do registro em @/lib/afiliados/lojas, não só Shopee).
+ * Loja não reconhecida -> sem oferta (nada pra "achar mais barato" numa
+ * loja que o sistema nem identifica).
  *
- * Cobertura honesta dos 3 estados do §8 (limitação estrutural, não bug):
- * como esta decisão roda no onBlur -- antes de qualquer tentativa real de
- * conversão, que só acontece no clique de salvar (§7.4) -- ela cobre
- * sem_api e nao_aplicavel de forma confiável (dependem só de "existe
- * credencial configurada?", conhecível no onBlur), mas NUNCA detecta
- * sem_autorizacao (Shopee configurada e a conversão falhando de verdade na
- * hora de salvar): esse caso só existiria depois do clique de salvar, e
- * mover o popup pra lá violaria a regra do §7.4 de nunca reaproveitar um
- * valor computado durante o onBlur. Hoje isso é invisível porque não há
- * credencial Shopee configurada ainda (shopee_configurado() sempre falso);
- * passa a ser uma lacuna real assim que a Fase 5 (tela de admin) permitir
- * configurar credencial e ela começar a falhar em produção -- ainda sem
- * solução definida.
+ * Cobertura honesta (limitação estrutural, não bug): como esta decisão roda
+ * no onBlur -- antes de qualquer tentativa real de conversão, que só
+ * acontece no clique de salvar (§7.4) -- ela cobre sem_api/nao_aplicavel de
+ * forma confiável (dependem só de "está habilitada?", conhecível no onBlur),
+ * mas não detecta sem_autorizacao (loja habilitada e a conversão falhando de
+ * verdade na hora de salvar, ex.: credencial Shopee inválida).
  */
 async function resolverOfertaWhatsapp(url: string): Promise<{ numero: string } | null> {
   const marketplace = detectarMarketplace(url);
@@ -103,10 +96,8 @@ async function resolverOfertaWhatsapp(url: string): Promise<{ numero: string } |
 
   const supabase = await createClient();
 
-  if (marketplace === "shopee") {
-    const { data: configurado } = await supabase.rpc("shopee_configurado");
-    if (configurado) return null;
-  }
+  const { data: habilitada } = await supabase.rpc("loja_afiliado_habilitada", { p_loja: marketplace });
+  if (habilitada) return null;
 
   const { data: banner } = await supabase
     .from("banner_publico")

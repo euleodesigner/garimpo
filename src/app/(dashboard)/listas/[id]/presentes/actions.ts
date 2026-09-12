@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { baixarImagemExterna } from "@/lib/marketplace";
+import { baixarImagemExterna, type MarketplaceSlug } from "@/lib/marketplace";
 import { resolverAfiliacao } from "@/lib/afiliacao";
 
 type State = { erro?: string; ok?: boolean } | undefined;
@@ -97,33 +97,31 @@ export async function adicionarPresente(
   // Conversão de afiliado (spec §7.4): roda aqui, no clique de salvar, lendo
   // `link` direto do formulário -- nunca reaproveita nenhum valor computado
   // durante o onBlur (busca automática de nome/preço/imagem, acima). A
-  // credencial só é carregada (RPC security definer, Task 1) se
-  // resolverAfiliacao de fato precisar dela -- ou seja, só quando o link é
-  // Shopee; pra Amazon/Shein/Temu/etc. este loader nunca roda, economizando
-  // a decriptação de Vault à toa. Não passa por is_owner(), porque quem está
-  // salvando é o creator, nunca o owner.
-  const carregarCredenciaisShopee = async () => {
+  // credencial só é carregada (RPC security definer) depois que
+  // resolverAfiliacao já detectou o marketplace, uma loja por vez -- nunca
+  // decripta Vault de lojas que o link nem é. Não passa por exigirOwner(),
+  // porque quem está salvando é o creator, nunca o owner.
+  const carregarCredencial = async (loja: MarketplaceSlug) => {
     // SUPABASE_SERVICE_ROLE_KEY pode faltar em ambientes novos/preview/CI --
     // sem ela, createAdminClient() lança ("supabaseKey is required"). Trata
-    // como "sem credencial configurada" (mesmo resultado de um Vault vazio)
+    // como "sem credencial configurada" (mesmo resultado de nenhuma linha)
     // em vez de derrubar o salvar-presente inteiro por causa de uma feature
     // opcional.
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) return null;
 
     const adminSupabase = createAdminClient();
     const { data: credRow, error: credError } = await adminSupabase
-      .rpc("credenciais_shopee")
-      .maybeSingle<{ app_id: string | null; app_secret: string | null }>();
+      .rpc("admin_ler_credencial_loja", { p_loja: loja })
+      .maybeSingle<{ identificador: string | null; identificador2: string | null; secret: string | null }>();
     if (credError) {
-      console.error("Falha ao ler credencial Shopee:", credError.message);
+      console.error(`Falha ao ler credencial de ${loja}:`, credError.message);
+      return null;
     }
-    return credRow?.app_id && credRow?.app_secret
-      ? { appId: credRow.app_id, appSecret: credRow.app_secret }
-      : null;
+    return credRow ?? null;
   };
   const { marketplace, linkAfiliado, afiliacaoStatus } = await resolverAfiliacao(
     link,
-    carregarCredenciaisShopee,
+    carregarCredencial,
   );
 
   // "O resultado devolvido ao client nunca é a linha inteira" (spec §7.4) --

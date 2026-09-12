@@ -1,21 +1,21 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CredencialCard } from "./credencial-card";
+import { LOJAS } from "@/lib/afiliados/lojas";
 import { Card } from "@/components/ui";
 
-type StatusCredenciais = {
-  shopee_id: string | null;
-  shopee_configurado: boolean;
-  awin_id: string | null;
-  awin_configurado: boolean;
-  admitad_id: string | null;
-  admitad_configurado: boolean;
+type StatusRow = {
+  loja: string;
+  habilitado: boolean;
+  identificador: string | null;
+  identificador2: string | null;
+  configurado: boolean;
+  ultimo_teste_ok: boolean | null;
+  ultimo_teste_erro: string | null;
 };
 
 export default async function AfiliadosPage() {
   const admin = createAdminClient();
-  const { data: status, error } = await admin
-    .rpc("admin_status_credenciais")
-    .maybeSingle<StatusCredenciais>();
+  const { data: statusRows, error } = await admin.rpc("admin_status_credenciais_lojas");
 
   if (error) {
     return (
@@ -29,35 +29,31 @@ export default async function AfiliadosPage() {
     );
   }
 
+  const statusPorLoja = new Map((statusRows as StatusRow[] | null)?.map((s) => [s.loja, s]));
+
   return (
-    <div className="flex flex-col gap-5">
-      <CredencialCard
-        provedor="shopee"
-        titulo="Shopee"
-        descricao="API oficial de afiliados. Converte o link e busca imagem/preço/título automaticamente."
-        idLabel="App ID"
-        secretLabel="App Secret"
-        idAtual={status?.shopee_id ?? null}
-        configurado={status?.shopee_configurado ?? false}
-      />
-      <CredencialCard
-        provedor="awin"
-        titulo="Awin"
-        descricao="Rede de afiliados usada para SHEIN, Temu e Magalu."
-        idLabel="Publisher ID"
-        secretLabel="API Key"
-        idAtual={status?.awin_id ?? null}
-        configurado={status?.awin_configurado ?? false}
-      />
-      <CredencialCard
-        provedor="admitad"
-        titulo="Admitad"
-        descricao="Rede de afiliados alternativa (mesmo propósito da Awin)."
-        idLabel="Client ID"
-        secretLabel="Client Secret"
-        idAtual={status?.admitad_id ?? null}
-        configurado={status?.admitad_configurado ?? false}
-      />
+    <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+      {LOJAS.map((loja) => {
+        const s = statusPorLoja.get(loja.id);
+        return (
+          <CredencialCard
+            key={loja.id}
+            loja={loja}
+            status={
+              s
+                ? {
+                    identificador: s.identificador,
+                    identificador2: s.identificador2,
+                    configurado: s.configurado,
+                    habilitado: s.habilitado,
+                    ultimoTesteOk: s.ultimo_teste_ok,
+                    ultimoTesteErro: s.ultimo_teste_erro,
+                  }
+                : null
+            }
+          />
+        );
+      })}
     </div>
   );
 }
