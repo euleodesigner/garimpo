@@ -17,11 +17,19 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
   const [ofertaWhatsapp, setOfertaWhatsapp] = useState<DadosProduto["ofertaWhatsapp"]>(null);
   const [imagemPreviewLocal, setImagemPreviewLocal] = useState<string | null>(null);
   const [nomeArquivo, setNomeArquivo] = useState<string | null>(null);
+  const [revisando, setRevisando] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     if (state?.ok) onClose();
   }, [state, onClose]);
+
+  // Se o salvar de verdade falhou, volta pra edição em vez de deixar o
+  // criador preso na tela de revisão sem enxergar os campos pra corrigir --
+  // derivado direto do render (não em efeito) pra não disparar setState
+  // dentro de useEffect.
+  const emRevisao = revisando && !state?.erro;
 
   async function aoSairDoLink(e: React.FocusEvent<HTMLInputElement>) {
     const url = e.target.value.trim();
@@ -63,83 +71,130 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
           Cole o link do produto e a gente busca nome, preço e imagem automaticamente.
         </p>
 
-        <form action={formAction}>
+        <form ref={formRef} action={formAction}>
           <input type="hidden" name="imagemUrlAuto" value={imagemPreviewLocal ? "" : (imagemAutoUrl ?? "")} />
 
-          <Label>Link do produto</Label>
-          <Input
-            name="link"
-            placeholder="Cole aqui o link da loja (Shopee, Magalu, SHEIN…)"
-            onBlur={aoSairDoLink}
-            required
-          />
-          {buscando && <p className="mt-1.5 text-xs text-sub">Buscando dados do produto…</p>}
-
-          <Label>Nome do produto</Label>
-          <Input
-            name="nome"
-            value={nome}
-            onChange={(e) => setNome(e.target.value)}
-            placeholder="Ex.: Camiseta Polo Infantil"
-            required
-          />
-
-          <Label>Preço (R$)</Label>
-          <Input
-            name="preco"
-            value={preco}
-            onChange={(e) => setPreco(e.target.value)}
-            placeholder="Ex.: 59,90"
-          />
-
-          <Label>Imagem</Label>
-          <div className="flex items-center gap-3">
-            <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-lg bg-bg text-2xl">
-              {imagemExibida ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={imagemExibida} alt="" className="h-full w-full object-cover" />
-              ) : (
-                "🎁"
-              )}
-            </div>
-            <div className="flex-1">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="cursor-pointer rounded-lg border border-line bg-white px-3 py-2 text-sm font-semibold text-ink hover:bg-bg"
-              >
-                {nomeArquivo ? "Trocar imagem" : "Enviar imagem manualmente"}
-              </button>
-              {nomeArquivo && (
-                <p className="mt-1 truncate text-xs text-sub">{nomeArquivo}</p>
-              )}
-              {!nomeArquivo && imagemAutoUrl && (
-                <p className="mt-1 text-xs text-sub">Imagem encontrada automaticamente</p>
-              )}
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              name="imagem"
-              accept="image/*"
-              onChange={aoEscolherArquivo}
-              className="hidden"
+          <div hidden={emRevisao}>
+            <Label>Link do produto</Label>
+            <Input
+              name="link"
+              placeholder="Cole aqui o link da loja (Shopee, Magalu, SHEIN…)"
+              onBlur={aoSairDoLink}
+              required={!emRevisao}
             />
+            {buscando && <p className="mt-1.5 text-xs text-sub">Buscando dados do produto…</p>}
+
+            <Label>Nome do produto</Label>
+            <Input
+              name="nome"
+              value={nome}
+              onChange={(e) => setNome(e.target.value)}
+              placeholder="Ex.: Camiseta Polo Infantil"
+              required={!emRevisao}
+            />
+
+            <Label>Preço (R$)</Label>
+            <Input
+              name="preco"
+              value={preco}
+              onChange={(e) => setPreco(e.target.value)}
+              placeholder="Ex.: 59,90"
+            />
+
+            <Label>Imagem</Label>
+            <div className="flex items-center gap-3">
+              <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-lg bg-bg text-2xl">
+                {imagemExibida ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={imagemExibida} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  "🎁"
+                )}
+              </div>
+              <div className="flex-1">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="cursor-pointer rounded-lg border border-line bg-white px-3 py-2 text-sm font-semibold text-ink hover:bg-bg"
+                >
+                  {nomeArquivo ? "Trocar imagem" : "Enviar imagem manualmente"}
+                </button>
+                {nomeArquivo && (
+                  <p className="mt-1 truncate text-xs text-sub">{nomeArquivo}</p>
+                )}
+                {!nomeArquivo && imagemAutoUrl && (
+                  <p className="mt-1 text-xs text-sub">Imagem encontrada automaticamente</p>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                name="imagem"
+                accept="image/*"
+                onChange={aoEscolherArquivo}
+                className="hidden"
+              />
+            </div>
           </div>
+
+          {emRevisao && (
+            <div className="rounded-xl border border-line bg-bg p-4">
+              <div className="flex items-center gap-3">
+                <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-lg bg-card text-2xl">
+                  {imagemExibida ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={imagemExibida} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    "🎁"
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-bold text-ink">{nome}</div>
+                  {preco && <div className="text-sm text-sub">R$ {preco}</div>}
+                </div>
+              </div>
+              <p className="mt-3 text-sm font-semibold text-danger">
+                ⚠️ Revise os dados. Após salvar, não será possível editar. Caso precise, exclua o
+                produto depois e crie outro.
+              </p>
+            </div>
+          )}
 
           <FieldError>{state?.erro}</FieldError>
 
           <div className="mt-6 flex justify-end gap-2.5">
-            <button
-              type="button"
-              onClick={onClose}
-              className="cursor-pointer rounded-lg px-3.5 py-2.5 text-sm font-semibold text-sub"
-            >
-              Cancelar
-            </button>
-            <ButtonPrimary type="submit" disabled={pending}>
-              {pending ? "Salvando…" : "Salvar presente"}
-            </ButtonPrimary>
+            {!emRevisao ? (
+              <>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="cursor-pointer rounded-lg px-3.5 py-2.5 text-sm font-semibold text-sub"
+                >
+                  Cancelar
+                </button>
+                <ButtonPrimary
+                  type="button"
+                  onClick={() => {
+                    if (formRef.current?.reportValidity()) setRevisando(true);
+                  }}
+                >
+                  Salvar presente
+                </ButtonPrimary>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setRevisando(false)}
+                  className="cursor-pointer rounded-lg px-3.5 py-2.5 text-sm font-semibold text-sub"
+                >
+                  Voltar e editar
+                </button>
+                <ButtonPrimary type="submit" disabled={pending}>
+                  {pending ? "Salvando…" : "Confirmar e salvar"}
+                </ButtonPrimary>
+              </>
+            )}
           </div>
         </form>
 

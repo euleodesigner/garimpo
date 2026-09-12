@@ -3,9 +3,10 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { baixarImagemExterna, type MarketplaceSlug } from "@/lib/marketplace";
-import { resolverAfiliacao } from "@/lib/afiliacao";
+import { baixarImagemExterna } from "@/lib/marketplace";
+import { resolverAfiliacao, escolherDadosProduto } from "@/lib/afiliacao";
+import { carregarCredencialLoja } from "@/lib/afiliados/credenciais";
+import { buscarDadosProdutoShopeePeloLink } from "@/lib/shopee-afiliado";
 
 type State = { erro?: string; ok?: boolean } | undefined;
 
@@ -66,6 +67,41 @@ export async function adicionarPresente(
   // concede, e um `.update()` depois do insert seria bloqueado pela RLS
   // (não existe policy de update pra ninguém além do owner da plataforma)
   const produtoId = crypto.randomUUID();
+
+  // Conversão de afiliado (spec §7.4): roda aqui, no clique de salvar, lendo
+  // `link` direto do formulário -- nunca reaproveita nenhum valor computado
+  // durante o onBlur (busca automática de nome/preço/imagem, acima). A
+  // credencial só é carregada (RPC security definer) depois que
+  // resolverAfiliacao já detectou o marketplace, uma loja por vez -- nunca
+  // decripta Vault de lojas que o link nem é. Não passa por exigirOwner(),
+  // porque quem está salvando é o creator, nunca o owner.
+  const { marketplace, linkAfiliado, afiliacaoStatus } = await resolverAfiliacao(
+    link,
+    carregarCredencialLoja,
+  );
+
+  // Dado autoritativo do produto (nome/preço/imagem): hoje só a Shopee tem
+  // API capaz de devolver isso pelo link exato -- recalculado aqui de novo
+  // (nunca confiando no que o formulário mandou) porque é o servidor quem
+  // decide o valor final gravado, o mesmo princípio de nunca confiar no
+  // client que já vale pro link_afiliado. Se a Shopee não responder (ou não
+  // for a loja), cai pro que veio do formulário/scraping do onBlur.
+  let dadosShopee: Awaited<ReturnType<typeof buscarDadosProdutoShopeePeloLink>> = null;
+  if (marketplace === "shopee") {
+    const credShopee = await carregarCredencialLoja("shopee");
+    if (credShopee?.identificador && credShopee.secret) {
+      dadosShopee = await buscarDadosProdutoShopeePeloLink(link, {
+        appId: credShopee.identificador,
+        appSecret: credShopee.secret,
+      });
+    }
+  }
+  const dadosFinais = escolherDadosProduto({ nome, preco }, dadosShopee);
+
+  // Imagem: upload manual do criador sempre vence (escolha explícita dele).
+  // Sem upload manual, prioriza a imagem que veio da API da Shopee (mais
+  // confiável que o og:image genérico); sem isso também, cai pro
+  // "imagemUrlAuto" que o onBlur já tinha extraído por scraping.
   let imagemUrl: string | null = null;
 
   if (imagem && imagem.size > 0 && imagem.type.startsWith("image/")) {
@@ -78,51 +114,24 @@ export async function adicionarPresente(
       const { data: pub } = supabase.storage.from("public-media").getPublicUrl(path);
       imagemUrl = pub.publicUrl;
     }
-  } else if (imagemUrlAuto) {
-    const baixada = await baixarImagemExterna(imagemUrlAuto);
-    if (baixada) {
-      const ext = baixada.contentType.split("/")[1]?.split(";")[0] ?? "jpg";
-      const extSegura = extensaoSegura(`arquivo.${ext}`);
-      const path = `products/${listaId}/${produtoId}.${extSegura}`;
-      const { error: uploadError } = await supabase.storage
-        .from("public-media")
-        .upload(path, baixada.bytes, { upsert: true, contentType: baixada.contentType });
-      if (!uploadError) {
-        const { data: pub } = supabase.storage.from("public-media").getPublicUrl(path);
-        imagemUrl = pub.publicUrl;
+  } else {
+    const imagemExterna = dadosShopee?.imagem || imagemUrlAuto;
+    if (imagemExterna) {
+      const baixada = await baixarImagemExterna(imagemExterna);
+      if (baixada) {
+        const ext = baixada.contentType.split("/")[1]?.split(";")[0] ?? "jpg";
+        const extSegura = extensaoSegura(`arquivo.${ext}`);
+        const path = `products/${listaId}/${produtoId}.${extSegura}`;
+        const { error: uploadError } = await supabase.storage
+          .from("public-media")
+          .upload(path, baixada.bytes, { upsert: true, contentType: baixada.contentType });
+        if (!uploadError) {
+          const { data: pub } = supabase.storage.from("public-media").getPublicUrl(path);
+          imagemUrl = pub.publicUrl;
+        }
       }
     }
   }
-
-  // Conversão de afiliado (spec §7.4): roda aqui, no clique de salvar, lendo
-  // `link` direto do formulário -- nunca reaproveita nenhum valor computado
-  // durante o onBlur (busca automática de nome/preço/imagem, acima). A
-  // credencial só é carregada (RPC security definer) depois que
-  // resolverAfiliacao já detectou o marketplace, uma loja por vez -- nunca
-  // decripta Vault de lojas que o link nem é. Não passa por exigirOwner(),
-  // porque quem está salvando é o creator, nunca o owner.
-  const carregarCredencial = async (loja: MarketplaceSlug) => {
-    // SUPABASE_SERVICE_ROLE_KEY pode faltar em ambientes novos/preview/CI --
-    // sem ela, createAdminClient() lança ("supabaseKey is required"). Trata
-    // como "sem credencial configurada" (mesmo resultado de nenhuma linha)
-    // em vez de derrubar o salvar-presente inteiro por causa de uma feature
-    // opcional.
-    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) return null;
-
-    const adminSupabase = createAdminClient();
-    const { data: credRow, error: credError } = await adminSupabase
-      .rpc("admin_ler_credencial_loja", { p_loja: loja })
-      .maybeSingle<{ identificador: string | null; identificador2: string | null; secret: string | null }>();
-    if (credError) {
-      console.error(`Falha ao ler credencial de ${loja}:`, credError.message);
-      return null;
-    }
-    return credRow ?? null;
-  };
-  const { marketplace, linkAfiliado, afiliacaoStatus } = await resolverAfiliacao(
-    link,
-    carregarCredencial,
-  );
 
   // "O resultado devolvido ao client nunca é a linha inteira" (spec §7.4) --
   // por isso este insert nunca encadeia .select(): devolver a linha criada
@@ -131,8 +140,8 @@ export async function adicionarPresente(
   const { error } = await supabase.from("products").insert({
     id: produtoId,
     list_id: listaId,
-    nome,
-    preco,
+    nome: dadosFinais.nome,
+    preco: dadosFinais.preco,
     link_original: link,
     quantidade: 1,
     imagem_url: imagemUrl,

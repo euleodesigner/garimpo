@@ -3,6 +3,8 @@
 import * as cheerio from "cheerio";
 import { fetchSeguro, urlDeLojaSuportada, detectarMarketplace } from "@/lib/marketplace";
 import { createClient } from "@/lib/supabase/server";
+import { carregarCredencialLoja } from "@/lib/afiliados/credenciais";
+import { buscarDadosProdutoShopeePeloLink } from "@/lib/shopee-afiliado";
 
 export type DadosProduto = {
   titulo: string | null;
@@ -24,6 +26,28 @@ export async function buscarDadosProduto(url: string): Promise<DadosProduto | { 
   if (!url.trim()) return { erro: "Cole um link primeiro." };
 
   const ofertaWhatsapp = await resolverOfertaWhatsapp(url);
+
+  // Shopee tem API oficial capaz de devolver nome/preço/imagem reais do
+  // produto (nenhuma outra loja integrada tem isso) -- tentamos primeiro,
+  // e só caímos pro scraping genérico abaixo se não for Shopee ou a
+  // chamada não der certo (item não encontrado, credencial ausente, etc.).
+  if (detectarMarketplace(url) === "shopee") {
+    const credShopee = await carregarCredencialLoja("shopee");
+    if (credShopee?.identificador && credShopee.secret) {
+      const dadosShopee = await buscarDadosProdutoShopeePeloLink(url, {
+        appId: credShopee.identificador,
+        appSecret: credShopee.secret,
+      });
+      if (dadosShopee) {
+        return {
+          titulo: dadosShopee.nome,
+          imagem: dadosShopee.imagem,
+          preco: dadosShopee.preco,
+          ofertaWhatsapp,
+        };
+      }
+    }
+  }
 
   if (!urlDeLojaSuportada(url)) {
     // loja fora da allowlist -- não é erro, só não dá pra buscar

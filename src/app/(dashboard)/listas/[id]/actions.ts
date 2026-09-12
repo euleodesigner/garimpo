@@ -157,19 +157,3 @@ export async function excluirLista(listaId: string) {
   await supabase.from("lists").delete().eq("id", listaId).eq("owner_id", user.id);
   redirect("/listas");
 }
-
-export async function enviarRecadoCreator(listaId: string, _prev: State, formData: FormData): Promise<State> {
-  const { supabase, autorizado } = await ownerClient(listaId);
-  if (!autorizado) return { erro: "Lista não encontrada." };
-
-  const nome = String(formData.get("nome") ?? "").trim();
-  const texto = String(formData.get("texto") ?? "").trim();
-  if (!nome || !texto) return { erro: "Preencha seu nome e o recadinho." };
-
-  const { error } = await supabase.from("messages").insert({ list_id: listaId, nome, texto });
-  if (error) {
-    return { erro: "Não foi possível enviar. Confira se \"Recadinhos\" está ativo em Configurações." };
-  }
-
-  revalidatePath(`/listas/${listaId}/recadinhos`);
-}

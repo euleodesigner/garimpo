@@ -1,5 +1,5 @@
 import { detectarMarketplace, type MarketplaceSlug } from "./marketplace";
-import { converterLinkShopee } from "./shopee-afiliado";
+import { converterLinkShopee, type DadosProdutoShopee } from "./shopee-afiliado";
 import { converterTagUrl, converterAwinDeepLink } from "./afiliados/conversores";
 
 export type AfiliacaoStatus = "convertido" | "sem_api" | "sem_autorizacao" | "nao_aplicavel";
@@ -89,4 +89,26 @@ export async function resolverAfiliacao(
     default:
       return { marketplace, linkAfiliado: null, afiliacaoStatus: "nao_aplicavel" };
   }
+}
+
+/**
+ * Decide o nome/preço finais de um produto na hora de salvar (§ "camada de
+ * dados automáticos"). Hoje só a Shopee tem API oficial capaz de devolver
+ * dado de produto pelo link exato -- nenhuma outra loja integrada oferece
+ * isso. Por isso, quando `dadosShopee` existe, ele é a fonte de verdade: o
+ * nome e o preço da API sempre prevalecem sobre o que veio do formulário
+ * (preenchido automaticamente por scraping ou editado à mão pelo criador),
+ * porque o objetivo é o card sempre refletir o preço real da loja. Preço
+ * ausente na resposta da API (nunca acontece na prática, mas a API não dá
+ * essa garantia) cai de volta pro valor do formulário.
+ */
+export function escolherDadosProduto(
+  formulario: { nome: string; preco: number | null },
+  dadosShopee: DadosProdutoShopee | null,
+): { nome: string; preco: number | null } {
+  if (!dadosShopee) return formulario;
+  return {
+    nome: dadosShopee.nome,
+    preco: dadosShopee.preco ?? formulario.preco,
+  };
 }
