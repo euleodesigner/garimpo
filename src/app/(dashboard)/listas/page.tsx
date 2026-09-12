@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { ButtonPrimary, ButtonOutline, Card, Chip } from "@/components/ui";
+import { ExcluirListaButton } from "./[id]/config/excluir-lista-button";
 
 export default async function MinhasListasPage() {
   const supabase = await createClient();
@@ -48,6 +49,9 @@ export default async function MinhasListasPage() {
               <Link href={`/listas/${l.id}/presentes`}>
                 <ButtonOutline className="mt-5 w-full">Gerenciar lista →</ButtonOutline>
               </Link>
+              <div className="mt-2 text-right">
+                <ExcluirListaButton listaId={l.id} nomeLista={l.nome} />
+              </div>
             </Card>
           ))}
         </div>

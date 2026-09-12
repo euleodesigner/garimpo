@@ -2,9 +2,11 @@
 
 import { useActionState } from "react";
 import { atualizarConfiguracoes, ativarLista, encerrarEvento } from "../actions";
+import { ExcluirListaButton } from "./excluir-lista-button";
 import { Card, Input, Label, ButtonPrimary, ButtonOutline } from "@/components/ui";
 
 type Inicial = {
+  nome: string;
   slug: string;
   status: string;
   feat_recados: boolean;
@@ -65,7 +67,7 @@ export function ConfigForm({ listaId, inicial }: { listaId: string; inicial: Ini
         <p className="mt-1 text-sm text-sub">
           Essas ações não podem ser desfeitas — a lista nunca volta a um estágio anterior.
         </p>
-        <div className="mt-4 flex gap-3">
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           {inicial.status === "rascunho" && (
             <form action={ativarLista.bind(null, listaId)}>
               <ButtonPrimary type="submit">Ativar lista</ButtonPrimary>
@@ -79,6 +81,17 @@ export function ConfigForm({ listaId, inicial }: { listaId: string; inicial: Ini
           {inicial.status === "arquivada" && (
             <span className="text-sm text-sub">Esta lista está encerrada.</span>
           )}
+        </div>
+      </Card>
+
+      <Card>
+        <h2 className="text-xl font-extrabold text-danger">Excluir lista</h2>
+        <p className="mt-1 text-sm text-sub">
+          Remove a lista de vez, junto com presentes, recadinhos e reservas. Não tem como desfazer
+          pela interface.
+        </p>
+        <div className="mt-4">
+          <ExcluirListaButton listaId={listaId} nomeLista={inicial.nome} />
         </div>
       </Card>
     </div>

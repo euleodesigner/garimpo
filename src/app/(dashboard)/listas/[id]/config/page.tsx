@@ -10,7 +10,7 @@ export default async function ConfigPage({ params }: { params: Promise<{ id: str
 
   const { data: lista } = await supabase
     .from("lists")
-    .select("slug, status, feat_recados, feat_rsvp, feat_notif_email")
+    .select("nome, slug, status, feat_recados, feat_rsvp, feat_notif_email")
     .eq("id", id)
     .eq("owner_id", user!.id)
     .maybeSingle();
