@@ -35,9 +35,18 @@ export async function reservar(
 
 type SimpleState = { erro?: string; ok?: boolean } | undefined;
 
+// `listaId` chega como argumento vinculado (bind) de uma Server Action --
+// nada impede um cliente malicioso de forjar o POST com um listaId
+// diferente do que corresponde ao `slug`, inserindo recado/RSVP numa lista
+// alheia ou contornando a flag feat_recados/feat_rsvp (achado da revisão de
+// segurança). Por isso ignoramos o parâmetro pra gravação e resolvemos o
+// list_id de verdade a partir do slug, checando a flag antes de inserir.
+// O parâmetro continua na assinatura só por compatibilidade com o
+// client component (bind já espera essa posição).
+
 export async function enviarRecado(
   slug: string,
-  listaId: string,
+  _listaIdNaoConfiavel: string,
   _prev: SimpleState,
   formData: FormData,
 ): Promise<SimpleState> {
@@ -46,7 +55,14 @@ export async function enviarRecado(
   if (!nome || !texto) return { erro: "Preencha seu nome e o recadinho." };
 
   const supabase = await createClient();
-  const { error } = await supabase.from("messages").insert({ list_id: listaId, nome, texto });
+  const { data: lista } = await supabase
+    .from("lists")
+    .select("id, feat_recados")
+    .eq("slug", slug)
+    .maybeSingle();
+  if (!lista || !lista.feat_recados) return { erro: "Não foi possível enviar. Tente de novo." };
+
+  const { error } = await supabase.from("messages").insert({ list_id: lista.id, nome, texto });
   if (error) return { erro: "Não foi possível enviar. Tente de novo." };
 
   revalidatePath(`/${slug}`);
@@ -55,7 +71,7 @@ export async function enviarRecado(
 
 export async function confirmarPresenca(
   slug: string,
-  listaId: string,
+  _listaIdNaoConfiavel: string,
   _prev: SimpleState,
   formData: FormData,
 ): Promise<SimpleState> {
@@ -67,9 +83,16 @@ export async function confirmarPresenca(
   if (!nome) return { erro: "Informe seu nome." };
 
   const supabase = await createClient();
+  const { data: lista } = await supabase
+    .from("lists")
+    .select("id, feat_rsvp")
+    .eq("slug", slug)
+    .maybeSingle();
+  if (!lista || !lista.feat_rsvp) return { erro: "Não foi possível confirmar. Tente de novo." };
+
   const { error } = await supabase
     .from("rsvps")
-    .insert({ list_id: listaId, nome, presente, acompanhantes });
+    .insert({ list_id: lista.id, nome, presente, acompanhantes });
   if (error) return { erro: "Não foi possível confirmar. Tente de novo." };
 
   revalidatePath(`/${slug}`);
