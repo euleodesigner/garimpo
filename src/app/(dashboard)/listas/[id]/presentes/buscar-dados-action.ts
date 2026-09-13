@@ -1,11 +1,11 @@
 "use server";
 
-import * as cheerio from "cheerio";
 import { fetchSeguro, urlDeLojaSuportada, detectarMarketplace } from "@/lib/marketplace";
 import { createClient } from "@/lib/supabase/server";
 import { carregarCredencialLoja } from "@/lib/afiliados/credenciais";
 import { buscarDadosProdutoShopeePeloLink } from "@/lib/shopee-afiliado";
 import { renderizarEExtrairDados } from "@/lib/scraping/render-navegador";
+import { extrairDadosDeHtmlRenderizado } from "@/lib/scraping/extrair-dados-renderizados";
 
 export type DadosProduto = {
   titulo: string | null;
@@ -85,44 +85,38 @@ export async function buscarDadosProduto(url: string): Promise<DadosProduto | { 
     return { titulo: null, imagem: null, preco: null, ofertaWhatsapp };
   }
 
-  const $ = cheerio.load(html);
-  const titulo =
-    $('meta[property="og:title"]').attr("content")?.trim() ||
-    $("title").text().trim() ||
-    null;
-  const imagem = $('meta[property="og:image"]').attr("content")?.trim() || null;
+  // Mesma extração usada no resultado do navegador headless (JSON-LD >
+  // og: > preço solto no texto) -- reaproveitada aqui pro HTML puro, sem
+  // duplicar a lógica de leitura. `extraido` só conta como "achou algo" se
+  // veio de JSON-LD ou og: (sinal forte); a tag <title> genérica (quase
+  // toda página tem uma, mesmo SPA sem conteúdo real carregado) NUNCA conta
+  // aqui -- só é usada como último recurso no valor final devolvido, pra
+  // não mascarar "não achei nada útil" e bloquear a tentativa do plano B.
+  const extraido = extrairDadosDeHtmlRenderizado(html);
 
-  // preço não tem tag Open Graph amplamente suportada (spec §8) -- tenta as
-  // variantes mais comuns, mas o fallback manual é esperado com frequência,
-  // principalmente em SPAs (Shein/Temu) que só injetam o preço via JS
-  const precoTexto =
-    $('meta[property="product:price:amount"]').attr("content") ||
-    $('meta[property="og:price:amount"]').attr("content") ||
-    $('[itemprop="price"]').attr("content") ||
-    null;
-  const preco = precoTexto ? Number(precoTexto.replace(",", ".")) : null;
-  const precoValido = preco != null && !Number.isNaN(preco) ? preco : null;
-
-  // Plano B: o scraping simples (sem executar JS) não achou nem nome nem
-  // imagem -- provável loja que monta a página inteira via JavaScript
-  // (Shopee sem credencial, SHEIN, Temu...). Abre um navegador de verdade
-  // por até 4s como última tentativa antes de cair no preenchimento manual.
-  if (!titulo && !imagem) {
+  // Plano B: o scraping simples (sem executar JS) não achou nome nem
+  // imagem de fonte confiável -- provável loja que monta a página inteira
+  // via JavaScript (Shopee sem credencial, SHEIN, Temu...). Abre um
+  // navegador de verdade por até 4s como última tentativa antes de cair no
+  // preenchimento manual.
+  if (!extraido?.titulo && !extraido?.imagem) {
     const dadosRenderizados = await renderizarEExtrairDados(url);
     if (dadosRenderizados) {
       return {
         titulo: dadosRenderizados.titulo,
         imagem: dadosRenderizados.imagem,
-        preco: dadosRenderizados.preco ?? precoValido,
+        preco: dadosRenderizados.preco ?? extraido?.preco ?? null,
         ofertaWhatsapp,
       };
     }
   }
 
+  const tituloTagGenerica = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim() || null;
+
   return {
-    titulo,
-    imagem,
-    preco: precoValido,
+    titulo: extraido?.titulo ?? tituloTagGenerica,
+    imagem: extraido?.imagem ?? null,
+    preco: extraido?.preco ?? null,
     ofertaWhatsapp,
   };
 }

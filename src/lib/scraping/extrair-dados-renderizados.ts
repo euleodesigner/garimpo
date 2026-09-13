@@ -32,7 +32,12 @@ function extrairDeJsonLd($: cheerio.CheerioAPI): DadosExtraidos | null {
     for (const item of candidatos) {
       if (!item || typeof item !== "object") continue;
       const obj = item as Record<string, unknown>;
-      if (obj["@type"] !== "Product") continue;
+      // schema.org permite "@type" como string única OU lista de tipos
+      // (ex.: ["Product", "IndividualProduct"]) -- aceitar só a string exata
+      // deixava passar batido um formato válido e comum.
+      const tipo = obj["@type"];
+      const ehProduto = tipo === "Product" || (Array.isArray(tipo) && tipo.includes("Product"));
+      if (!ehProduto) continue;
 
       const nome = typeof obj.name === "string" ? obj.name : null;
       const imagem = typeof obj.image === "string" ? obj.image : Array.isArray(obj.image) ? obj.image[0] : null;
@@ -54,12 +59,18 @@ function extrairDeMetaTags($: cheerio.CheerioAPI): DadosExtraidos | null {
   return { titulo, imagem, preco: null };
 }
 
-/** Último recurso: acha um valor em "R$ 1.234,56" solto no texto visível da página. */
+/**
+ * Último recurso: acha um valor em "R$ 1.234,56" solto no texto visível da
+ * página. Pega a ÚLTIMA ocorrência, não a primeira -- padrão comum de
+ * promoção é "De R$ 200,00 por R$ 99,99", onde o primeiro valor é o preço
+ * riscado (o de antes do desconto), não o que o convidado paga de verdade.
+ */
 function extrairPrecoDoTexto($: cheerio.CheerioAPI): number | null {
   const texto = $("body").text();
-  const match = texto.match(/R\$\s*([\d.]+,\d{2})/);
-  if (!match) return null;
-  const numero = Number(match[1].replace(/\./g, "").replace(",", "."));
+  const matches = [...texto.matchAll(/R\$\s*([\d.]+,\d{2})/g)];
+  if (!matches.length) return null;
+  const ultimo = matches[matches.length - 1][1];
+  const numero = Number(ultimo.replace(/\./g, "").replace(",", "."));
   return Number.isFinite(numero) ? numero : null;
 }
 

@@ -68,6 +68,23 @@ describe("extrairDadosDeHtmlRenderizado", () => {
     expect(extrairDadosDeHtmlRenderizado(html)?.titulo).toBe("Produto via og");
   });
 
+  test("JSON-LD com @type como lista (ex.: [\"Product\", \"IndividualProduct\"]) ainda é reconhecido", () => {
+    const html = `
+      <html><head>
+        <script type="application/ld+json">{"@type":["Product","IndividualProduct"],"name":"Produto com tipos múltiplos","offers":{"price":"25"}}</script>
+      </head><body></body></html>
+    `;
+    expect(extrairDadosDeHtmlRenderizado(html)?.titulo).toBe("Produto com tipos múltiplos");
+  });
+
+  test("preço 'De R$ 200,00 por R$ 99,99' no texto -- pega o preço final (por), não o riscado (de)", () => {
+    const html = `
+      <html><head><meta property="og:title" content="Produto em promoção" /></head>
+      <body><div>De R$ 200,00 por R$ 99,99</div></body></html>
+    `;
+    expect(extrairDadosDeHtmlRenderizado(html)?.preco).toBe(99.99);
+  });
+
   test("JSON-LD pode vir como lista de blocos -- acha o do tipo Product entre outros", () => {
     const html = `
       <html><head>
