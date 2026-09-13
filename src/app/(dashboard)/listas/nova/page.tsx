@@ -15,6 +15,11 @@ const TIPOS = [
   "📚 Material Escolar", "✨ Outro",
 ];
 
+// Mesmo domínio de exibição usado em Configurações -- sempre a partir de
+// NEXT_PUBLIC_APP_URL, nunca um texto fixo. Path direto, sem subdomínio.
+const DOMINIO_EXIBICAO =
+  process.env.NEXT_PUBLIC_APP_URL?.replace(/^https?:\/\//, "").replace(/\/$/, "") ?? "lista.trivormarketing.com";
+
 export default function NovaListaPage() {
   const router = useRouter();
   const [passo, setPasso] = useState<1 | 2>(1);
@@ -95,6 +100,7 @@ export default function NovaListaPage() {
 
             <Label>Endereço público</Label>
             <div className="flex items-center gap-2">
+              <span className="whitespace-nowrap text-sm text-sub">{DOMINIO_EXIBICAO}/</span>
               <Input
                 value={slugAtual}
                 onChange={(e) => {
@@ -102,7 +108,6 @@ export default function NovaListaPage() {
                   setSlugTocado(true);
                 }}
               />
-              <span className="whitespace-nowrap text-sm text-sub">.listagarimpo.com.br</span>
             </div>
             <p className="mt-1.5 text-xs text-sub">Este será o endereço público da sua lista.</p>
             <FieldError>{state?.erro}</FieldError>

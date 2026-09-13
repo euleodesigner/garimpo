@@ -14,6 +14,13 @@ type Inicial = {
   feat_notif_email: boolean;
 };
 
+// Domínio de exibição só pra mostrar como fica o link -- o link real (com
+// protocolo e o slug) é montado do mesmo jeito na aba Compartilhar, sempre
+// a partir de NEXT_PUBLIC_APP_URL (nunca um texto fixo). Sem subdomínio: é
+// path direto ("dominio.com/{slug}"), não "{slug}.dominio.com".
+const DOMINIO_EXIBICAO =
+  process.env.NEXT_PUBLIC_APP_URL?.replace(/^https?:\/\//, "").replace(/\/$/, "") ?? "lista.trivormarketing.com";
+
 export function ConfigForm({ listaId, inicial }: { listaId: string; inicial: Inicial }) {
   const acao = atualizarConfiguracoes.bind(null, listaId);
   const [state, formAction, pending] = useActionState(acao, undefined);
@@ -28,8 +35,8 @@ export function ConfigForm({ listaId, inicial }: { listaId: string; inicial: Ini
         <form action={formAction}>
           <Label>Endereço público</Label>
           <div className="flex items-center gap-2">
+            <span className="whitespace-nowrap text-sm text-sub">{DOMINIO_EXIBICAO}/</span>
             <Input name="slug" defaultValue={inicial.slug} disabled={slugTravado} />
-            <span className="whitespace-nowrap text-sm text-sub">.listagarimpo.com.br</span>
           </div>
           {slugTravado && (
             <p className="mt-1.5 text-xs text-sub">
