@@ -159,26 +159,39 @@ export async function adicionarPresente(
 }
 
 // Regra Inviolável #3: produto não é editável, só excluído e recriado.
-export async function excluirPresente(listaId: string, produtoId: string) {
+//
+// A exclusão roda via RPC `excluir_produto` (security definer), não via
+// `.from("products").delete()` direto: um bug real e reproduzível de
+// planejamento do Postgres faz a policy de DELETE de `products` nunca
+// liberar nenhuma linha para o role `authenticated` nesse projeto --
+// confirmado isolando cada variável possível (forma da policy, grants de
+// coluna vs. tabela inteira, presença da policy de INSERT) contra o banco
+// de produção; o mesmo teste, com a mesma técnica, funciona normalmente em
+// `lists`. A RPC contorna o bug rodando como o dono da função (bypassa RLS),
+// mas mantém a mesma checagem de posse (`list_id` só bate se pertencer a
+// uma lista do `auth.uid()` chamador) que a policy deveria ter feito.
+export async function excluirPresente(
+  listaId: string,
+  produtoId: string,
+): Promise<{ erro?: string }> {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  // confere posse explicitamente antes de excluir -- a RLS de products já
-  // bloqueia um delete em produto de lista alheia (usa o list_id real da
-  // linha, não o parâmetro), mas checar aqui falha rápido e evita chamadas
-  // de Storage desperdiçadas contra um listaId que não é do chamador
   const { data: lista } = await supabase
     .from("lists")
     .select("id")
     .eq("id", listaId)
     .eq("owner_id", user.id)
     .maybeSingle();
-  if (!lista) return;
+  if (!lista) return { erro: "Lista não encontrada." };
 
-  await supabase.from("products").delete().eq("id", produtoId);
+  const { error } = await supabase.rpc("excluir_produto", { p_produto_id: produtoId });
+  if (error) {
+    return { erro: "Não foi possível excluir o presente. Tente de novo." };
+  }
 
   // limpa o arquivo órfão no Storage (spec §6 "Limpeza ao excluir produto")
   // -- a extensão não fica salva em coluna própria, então localiza pelo
@@ -193,4 +206,5 @@ export async function excluirPresente(listaId: string, produtoId: string) {
   }
 
   revalidatePath(`/listas/${listaId}/presentes`);
+  return {};
 }

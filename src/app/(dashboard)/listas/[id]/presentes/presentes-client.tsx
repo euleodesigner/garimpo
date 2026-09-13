@@ -1,9 +1,28 @@
 "use client";
 
-import { useState } from "react";
+import { useActionState, useState } from "react";
 import { AddPresenteModal } from "./add-presente-modal";
 import { excluirPresente } from "./actions";
-import { ButtonPrimary, Card, Chip } from "@/components/ui";
+import { ButtonPrimary, Card, Chip, FieldError } from "@/components/ui";
+
+function BotaoExcluir({ listaId, produtoId }: { listaId: string; produtoId: string }) {
+  const [state, formAction, pending] = useActionState(
+    excluirPresente.bind(null, listaId, produtoId),
+    undefined,
+  );
+
+  return (
+    <form action={formAction} className="text-right">
+      <button
+        disabled={pending}
+        className="cursor-pointer rounded-lg border border-line px-3 py-2 text-xs font-semibold text-danger disabled:opacity-50"
+      >
+        {pending ? "Excluindo…" : "Excluir"}
+      </button>
+      <FieldError>{state?.erro}</FieldError>
+    </form>
+  );
+}
 
 type Produto = { id: string; nome: string; preco: number | null; imagem_url: string | null };
 
@@ -53,11 +72,7 @@ export function PresentesClient({
                   {reservadoSet.has(p.id) && <Chip tone="gold">🔒 reservado</Chip>}
                 </div>
               </div>
-              <form action={excluirPresente.bind(null, listaId, p.id)}>
-                <button className="cursor-pointer rounded-lg border border-line px-3 py-2 text-xs font-semibold text-danger">
-                  Excluir
-                </button>
-              </form>
+              <BotaoExcluir listaId={listaId} produtoId={p.id} />
             </div>
           ))}
         </div>
