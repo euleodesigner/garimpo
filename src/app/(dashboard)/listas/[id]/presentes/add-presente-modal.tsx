@@ -67,9 +67,6 @@ export function AddPresenteModal({ listaId, onClose }: { listaId: string; onClos
         className="max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-card p-6"
       >
         <h2 className="text-xl font-extrabold text-ink">Adicionar presente</h2>
-        <p className="mt-1 text-sm text-sub">
-          Cole o link do produto e a gente busca nome, preço e imagem automaticamente.
-        </p>
 
         <form ref={formRef} action={formAction}>
           <input type="hidden" name="imagemUrlAuto" value={imagemPreviewLocal ? "" : (imagemAutoUrl ?? "")} />
