@@ -24,6 +24,18 @@ export type DadosProduto = {
 // das credenciais reais das lojas) fica pra quando essas credenciais
 // existirem -- aqui só lemos og:title/og:image/preço público da página.
 export async function buscarDadosProduto(url: string): Promise<DadosProduto | { erro: string }> {
+  // Server Actions são endpoints POST público-alcançáveis por id (o id vem
+  // no bundle JS, que qualquer um baixa sem estar logado) -- sem essa
+  // checagem, qualquer pessoa na internet conseguia disparar essa função e
+  // gastar a credencial paga da Shopee/abrir o navegador headless sem ser
+  // criador de verdade (achado de revisão de segurança). `adicionarPresente`
+  // já fazia essa checagem; essa função nunca fez.
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { erro: "Sessão expirada. Atualize a página e faça login de novo." };
+
   if (!url.trim()) return { erro: "Cole um link primeiro." };
 
   const ofertaWhatsapp = await resolverOfertaWhatsapp(url);
