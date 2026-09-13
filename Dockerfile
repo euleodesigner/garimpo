@@ -35,6 +35,14 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# Chromium "de sistema" (Alpine) pra busca automática de produto em lojas que
+# só carregam o conteúdo via JavaScript (Shopee, SHEIN, Temu...) -- usamos o
+# pacote da distro em vez do download embutido do Playwright porque o
+# binário que o Playwright baixa não roda em musl (base Alpine). O app aponta
+# pra esse executável via PLAYWRIGHT_CHROMIUM_PATH (ver src/lib/scraping).
+RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
+ENV PLAYWRIGHT_CHROMIUM_PATH=/usr/bin/chromium-browser
+
 RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 nextjs
 

@@ -138,7 +138,7 @@ function pareceHostPrivado(hostname: string): boolean {
  * de resolução (host inexistente etc.) é tratada como privado -- nega por
  * padrão, já que o fetch adiante ia falhar de qualquer forma.
  */
-async function enderecoResolvidoEhPrivado(hostname: string): Promise<boolean> {
+export async function enderecoResolvidoEhPrivado(hostname: string): Promise<boolean> {
   if (pareceHostPrivado(hostname)) return true;
 
   let enderecos: { address: string }[];

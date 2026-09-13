@@ -5,6 +5,7 @@ import { fetchSeguro, urlDeLojaSuportada, detectarMarketplace } from "@/lib/mark
 import { createClient } from "@/lib/supabase/server";
 import { carregarCredencialLoja } from "@/lib/afiliados/credenciais";
 import { buscarDadosProdutoShopeePeloLink } from "@/lib/shopee-afiliado";
+import { renderizarEExtrairDados } from "@/lib/scraping/render-navegador";
 
 export type DadosProduto = {
   titulo: string | null;
@@ -88,11 +89,28 @@ export async function buscarDadosProduto(url: string): Promise<DadosProduto | { 
     $('[itemprop="price"]').attr("content") ||
     null;
   const preco = precoTexto ? Number(precoTexto.replace(",", ".")) : null;
+  const precoValido = preco != null && !Number.isNaN(preco) ? preco : null;
+
+  // Plano B: o scraping simples (sem executar JS) não achou nem nome nem
+  // imagem -- provável loja que monta a página inteira via JavaScript
+  // (Shopee sem credencial, SHEIN, Temu...). Abre um navegador de verdade
+  // por até 4s como última tentativa antes de cair no preenchimento manual.
+  if (!titulo && !imagem) {
+    const dadosRenderizados = await renderizarEExtrairDados(url);
+    if (dadosRenderizados) {
+      return {
+        titulo: dadosRenderizados.titulo,
+        imagem: dadosRenderizados.imagem,
+        preco: dadosRenderizados.preco ?? precoValido,
+        ofertaWhatsapp,
+      };
+    }
+  }
 
   return {
     titulo,
     imagem,
-    preco: preco != null && !Number.isNaN(preco) ? preco : null,
+    preco: precoValido,
     ofertaWhatsapp,
   };
 }
