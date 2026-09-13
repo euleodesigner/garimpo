@@ -15,6 +15,12 @@ export type MarketplaceSlug = "shopee" | "shein" | "temu" | "magalu" | "amazon" 
 const MARKETPLACE_POR_DOMINIO: Record<string, MarketplaceSlug> = {
   "shopee.com.br": "shopee",
   "shopee.com": "shopee",
+  // domínio oficial de link curto da Shopee (o que o botão "compartilhar" do
+  // app gera, ex. "br.shp.ee/xxxx") -- forma mais comum de um creator colar
+  // um link de verdade, e a API oficial de afiliados aceita esse link direto
+  // como originUrl (confirmado contra a API real), então não precisa
+  // resolver o redirect antes de converter, só reconhecer o domínio aqui.
+  "shp.ee": "shopee",
   "shein.com": "shein",
   "shein.com.br": "shein",
   "temu.com": "temu",
