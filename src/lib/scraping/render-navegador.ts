@@ -1,4 +1,4 @@
-import { chromium } from "playwright-core";
+import type { Browser } from "playwright-core";
 import { hostnamePermitido, enderecoResolvidoEhPrivado } from "@/lib/marketplace";
 import { extrairDadosDeHtmlRenderizado, type DadosExtraidos } from "./extrair-dados-renderizados";
 
@@ -24,8 +24,15 @@ export async function renderizarEExtrairDados(url: string): Promise<DadosExtraid
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
   if (!executablePath) return null;
 
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+  let browser: Browser | null = null;
   try {
+    // Import dinâmico (não no topo do arquivo) de propósito: se o pacote
+    // falhar ao carregar por qualquer motivo no ambiente de produção (ex.:
+    // biblioteca do sistema faltando), isso NÃO pode derrubar a Server
+    // Action inteira (`buscarDadosProduto`) pra QUALQUER link -- só essa
+    // tentativa específica de plano B falha, silenciosamente, aqui dentro
+    // do try/catch.
+    const { chromium } = await import("playwright-core");
     browser = await chromium.launch({
       executablePath,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
