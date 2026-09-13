@@ -120,7 +120,7 @@ export function PublicListaClient({
                   key={p.id}
                   className={`overflow-hidden rounded-2xl border border-line bg-card ${reservado ? "opacity-70" : ""}`}
                 >
-                  <div className="grid h-28 place-items-center bg-bg text-4xl">
+                  <div className="grid h-28 place-items-center overflow-hidden bg-bg text-4xl">
                     {p.imagem_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={p.imagem_url} alt="" className="h-full w-full object-cover" />
